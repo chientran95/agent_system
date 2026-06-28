@@ -1,0 +1,28 @@
+[build-system]
+requires = ["uv"]
+build-backend = "uv.build"
+
+[project]
+name = "agent_system"
+version = "0.1.0"
+description = "Multi-agent Python project using Google ADK, Claude Agent SDK, LangChain Deep Agents, A2A, OpenTelemetry, and durable SQLite/file storage."
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.100.0",
+  "uvicorn>=0.23.0",
+  "httpx>=0.25.0",
+  "python-dotenv>=1.0.0",
+  "langchain>=0.0.259",
+  "deepagents>=0.1.0",
+  "langsmith>=0.0.18",
+  "opentelemetry-sdk>=1.23.0",
+  "opentelemetry-exporter-jaeger>=1.23.0",
+  "opentelemetry-instrumentation-httpx>=0.27.0",
+  "opentelemetry-instrumentation-fastapi>=0.31.0",
+  "sqlalchemy>=2.0.0",
+  "claude-agent-sdk>=0.1.0",
+  "google-adk-python>=0.1.0",
+]
+
+[project.scripts]
+agent-system = "agent_system.main:main"
