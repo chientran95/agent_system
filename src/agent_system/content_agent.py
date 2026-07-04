@@ -1,11 +1,14 @@
-import os
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
 
+import litellm
+from deepagents import create_deep_agent
+
 from .storage import FilesystemBackend
 from .state import DurableState
-from .settings import STORAGE_DIR, CHECKPOINT_DB, CLAUDE_MODEL
+from .settings import LANGCHAIN_OLLAMA_MODEL, LITELLM_OLLAMA_MODEL, STORAGE_DIR, CHECKPOINT_DB
 
 
 class SQLiteConversationMemory:
@@ -48,18 +51,7 @@ class ContentAgent:
         self.storage = FilesystemBackend(storage_dir)
         self.state = DurableState(checkpoint_db)
         self.memory = SQLiteConversationMemory(checkpoint_db.with_name("content_memory.sqlite"))
-        self.model_name = os.getenv("CLAUDE_MODEL", CLAUDE_MODEL)
-        self.client = self._build_agent_client()
-
-    def _build_agent_client(self) -> Any:
-        import importlib
-
-        deepagents = importlib.import_module("deepagents")
-        if hasattr(deepagents, "DeepAgent"):
-            DeepAgent = getattr(deepagents, "DeepAgent")
-            return DeepAgent(model=self.model_name)
-
-        raise ImportError("deepagents is required for ContentAgent. Install deepagents before running.")
+        self.client = create_deep_agent(model=LANGCHAIN_OLLAMA_MODEL)
 
     def write_draft(self, brief: str, draft_filename: str) -> Path:
         draft = self._run_content_pipeline(brief)
@@ -72,9 +64,12 @@ class ContentAgent:
 
     def _run_content_pipeline(self, brief: str) -> str:
         prompt = f"Write a news-style article from this brief:\n\n{brief}\n\nUse a clear headline, cite sources if present, and keep the draft between 450 and 650 words."
-        return self.client.run(prompt)
+        result = self.client.invoke({"messages": [{"role": "user", "content": prompt}]})
+        return result["messages"][-1].content
 
     def verify_draft(self, brief: str, draft: str) -> dict[str, Any]:
+        # Direct completion call, not the full drafting agent/tool loop -
+        # a rubric check doesn't need filesystem access or subagents.
         rubric = [
             "Headline matches the body.",
             "Sources are cited when available.",
@@ -84,9 +79,17 @@ class ContentAgent:
             f"Please evaluate the draft against the original brief and checklist below.\n\n"
             f"Brief:\n{brief}\n\nDraft:\n{draft}\n\n"
             f"Checklist:\n- {rubric[0]}\n- {rubric[1]}\n- {rubric[2]}\n\n"
-            "Answer in a compact JSON object with keys: verdict, issues, recommendations."
+            "Answer with only a compact JSON object with keys: verdict, issues, recommendations."
         )
-        return self.client.run(prompt)
+        response = litellm.completion(
+            model=LITELLM_OLLAMA_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        response_text = response.choices[0].message.content
+        try:
+            return json.loads(response_text)
+        except (json.JSONDecodeError, TypeError):
+            return {"verdict": "unknown", "issues": [response_text], "recommendations": []}
 
     def archive_note(self, filename: str, note: str) -> Path:
         return self.storage.write(filename, note)

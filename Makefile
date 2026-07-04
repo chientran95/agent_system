@@ -1,17 +1,20 @@
-.PHONY: install run dev check clean env example jaeger
+.PHONY: install run-code-agent run-content-agent run-orchestrator check clean env example jaeger
 
 # Install the project dependencies using uv.
 install:
 	@python3 -m pip show uv > /dev/null 2>&1 || python3 -m pip install -U uv
-	uv install
+	uv sync
 
-# Run the local FastAPI app through the uv entry point.
-run:
-	uv run agent-system
+# Run each agent as its own process; start these in separate terminals,
+# code-agent and content-agent first since the orchestrator calls them over A2A.
+run-code-agent:
+	uv run code-agent
 
-# Run the app with auto-reload for development.
-dev:
-	uv run agent-system --reload
+run-content-agent:
+	uv run content-agent
+
+run-orchestrator:
+	uv run orchestrator
 
 # Validate Python source files for syntax errors and lint with ruff.
 check:

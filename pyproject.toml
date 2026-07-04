@@ -16,13 +16,18 @@ dependencies = [
   "deepagents>=0.1.0",
   "langsmith>=0.0.18",
   "opentelemetry-sdk>=1.23.0",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.23.0",
   "opentelemetry-instrumentation-httpx>=0.27.0",
   "opentelemetry-instrumentation-fastapi>=0.31.0",
   "sqlalchemy>=2.0.0",
   "claude-agent-sdk>=0.1.0",
-  "google-adk>=2.3.0",
+  "google-adk[a2a]>=2.3.0",
   "ruff>=0.0.285",
+  "litellm>=1.90.3",
+  "langchain-ollama>=1.1.0",
 ]
 
 [project.scripts]
-agent-system = "agent_system.main:main"
+orchestrator = "agent_system.orchestrator_server:main"
+code-agent = "agent_system.code_agent_server:main"
+content-agent = "agent_system.content_agent_server:main"

@@ -3,6 +3,10 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
+
+from .settings import CLAUDE_MODEL
+
 
 class InMemorySaver:
     def __init__(self) -> None:
@@ -16,35 +20,40 @@ class InMemorySaver:
 
 
 class CodeAgent:
-    def __init__(self, api_key: str | None = None, model: str = "claude-3.5" ) -> None:
+    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         self.api_key = api_key or os.getenv("CLAUDE_API_KEY")
-        self.model = model
+        self.model = model or CLAUDE_MODEL
         self.memory = InMemorySaver()
-        self.client = self._build_client()
 
-    def _build_client(self) -> Any:
-        import importlib
+    async def generate_code(self, prompt: str) -> str:
+        options = ClaudeAgentOptions(
+            model=self.model,
+            env={"ANTHROPIC_API_KEY": self.api_key} if self.api_key else {},
+        )
 
-        module = importlib.import_module("claude_agent_sdk")
-        ClaudeAgentClient = getattr(module, "ClaudeAgentClient")
-        return ClaudeAgentClient(api_key=self.api_key, model=self.model)
+        chunks: list[str] = []
+        async for message in query(prompt=prompt, options=options):
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        chunks.append(block.text)
+
+        response_text = "".join(chunks)
+        self.save_interaction(prompt, response_text)
+        return response_text
 
     def save_interaction(self, input_text: str, output_text: str) -> None:
         self.memory.save({"input": input_text, "output": output_text})
 
-    def generate_code(self, prompt: str) -> str:
-        response = self.client.complete(prompt)
-        self.save_interaction(prompt, response.text)
-        return response.text
-
     def mechanical_verify(self, workspace_dir: Path, test_command: list[str] | None = None) -> bool:
         test_command = test_command or ["pytest"]
-        print("Running deterministic verification: tac --noEmit")
-        tac_process = subprocess.run(
-            ["tac", "--noEmit"], cwd=workspace_dir, capture_output=True, text=True
+
+        print("Running deterministic verification: ruff check")
+        lint_process = subprocess.run(
+            ["ruff", "check", "."], cwd=workspace_dir, capture_output=True, text=True
         )
-        if tac_process.returncode != 0:
-            print("tac failed:\n", tac_process.stdout, tac_process.stderr)
+        if lint_process.returncode != 0:
+            print("ruff check failed:\n", lint_process.stdout, lint_process.stderr)
             return False
 
         print("Running actual tests: %s" % " ".join(test_command))
