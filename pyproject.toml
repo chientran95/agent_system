@@ -25,9 +25,10 @@ dependencies = [
   "ruff>=0.0.285",
   "litellm>=1.90.3",
   "langchain-ollama>=1.1.0",
+  "ddgs>=9.14.4",
 ]
 
 [project.scripts]
 orchestrator = "agent_system.orchestrator_server:main"
 code-agent = "agent_system.code_agent_server:main"
-content-agent = "agent_system.content_agent_server:main"
+research-agent = "agent_system.research_agent_server:main"

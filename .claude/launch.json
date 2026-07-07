@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "spanish-backend",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd /home/chientran/workspace/vocabulary_leaning/spanish/backend && uv run uvicorn app.main:app --reload --port 8010"],
+      "port": 8010
+    },
+    {
+      "name": "spanish-frontend",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "cd /home/chientran/workspace/vocabulary_leaning/spanish/frontend && npm run dev"],
+      "port": 5173
+    }
+  ]
+}
