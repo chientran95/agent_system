@@ -10,6 +10,7 @@ from langchain_ollama import ChatOllama
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 
+from .langfuse_tracing import configure_litellm, get_langchain_callbacks
 from .storage import FilesystemBackend
 from .state import DurableState
 from .settings import OLLAMA_MODEL, LITELLM_OLLAMA_MODEL, STORAGE_DIR, CHECKPOINT_DB
@@ -70,6 +71,7 @@ class ContentAgent:
         self.memory = SQLiteConversationMemory(checkpoint_db.with_name("content_memory.sqlite"))
         self.model = ChatOllama(model=OLLAMA_MODEL)
         self.graph = self._build_graph()
+        configure_litellm()
         print(f"ContentAgent initialized with LLM=ollama:{OLLAMA_MODEL}")
 
     def _build_graph(self):
@@ -115,7 +117,8 @@ class ContentAgent:
         """Synchronous convenience entrypoint for direct/manual use, running
         the same graph a research_agent would invoke as a subagent."""
         result = self.graph.invoke(
-            {"messages": [HumanMessage(content=brief)], "draft_path": "", "verification": {}}
+            {"messages": [HumanMessage(content=brief)], "draft_path": "", "verification": {}},
+            config={"callbacks": get_langchain_callbacks()},
         )
         return Path(result["draft_path"])
 

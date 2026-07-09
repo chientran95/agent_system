@@ -3,6 +3,7 @@ from deepagents import create_deep_agent
 from langchain_core.tools import tool
 
 from .content_agent import ContentAgent
+from .langfuse_tracing import get_langchain_callbacks
 from .settings import LANGCHAIN_OLLAMA_MODEL
 
 RESEARCH_SYSTEM_PROMPT = (
@@ -46,7 +47,10 @@ class ResearchAgent:
 
     def research_and_write(self, topic: str) -> str:
         print(f"ResearchAgent: researching topic:\n{topic}\n")
-        result = self.client.invoke({"messages": [{"role": "user", "content": topic}]})
+        result = self.client.invoke(
+            {"messages": [{"role": "user", "content": topic}]},
+            config={"callbacks": get_langchain_callbacks()},
+        )
         return result["messages"][-1].content
 
     async def astream_research(self, topic: str):
@@ -55,7 +59,9 @@ class ResearchAgent:
         node_name == "__final__" and text == the finished response."""
         final_text = ""
         async for chunk in self.client.astream(
-            {"messages": [{"role": "user", "content": topic}]}, stream_mode="updates"
+            {"messages": [{"role": "user", "content": topic}]},
+            stream_mode="updates",
+            config={"callbacks": get_langchain_callbacks()},
         ):
             for node_name, node_output in (chunk or {}).items():
                 messages = node_output.get("messages", []) if isinstance(node_output, dict) else []

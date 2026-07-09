@@ -20,7 +20,15 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b")
 LITELLM_OLLAMA_MODEL = f"ollama_chat/{OLLAMA_MODEL}"
 LANGCHAIN_OLLAMA_MODEL = f"ollama:{OLLAMA_MODEL}"
 
-LANGCHAIN_API_KEY = os.getenv("LANGCHAIN_API_KEY")
+# LLM-semantic observability for the LangChain-based agents (content_agent's
+# graph, research_agent's deepagents graph, and litellm's raw completion
+# calls). Complements Jaeger, which only sees the generic HTTP/A2A layer.
+# LANGFUSE_BASE_URL is read directly from the environment by the Langfuse
+# SDK itself, so it isn't re-exposed here - only the keys gate whether we
+# attach callbacks at all.
+LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY")
+LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY")
+
 ADK_DEV_UI = os.getenv("ADK_DEV_UI", "http://localhost:3000")
 
 CODE_AGENT_HOST = os.getenv("CODE_AGENT_HOST", "localhost")
