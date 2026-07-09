@@ -26,6 +26,16 @@ class CodeAgent:
         self.memory = InMemorySaver()
 
     async def generate_code(self, prompt: str) -> str:
+        final_text = ""
+        async for kind, text in self.astream_code_pipeline(prompt):
+            if kind == "__final__":
+                final_text = text
+        return final_text
+
+    async def astream_code_pipeline(self, prompt: str):
+        """Streams ("assistant", text) chunks from Claude as it generates
+        code, in the same incremental pieces the SDK itself produces. The
+        final tuple has kind == "__final__" and text == the full response."""
         options = ClaudeAgentOptions(
             model=self.model,
             env={"ANTHROPIC_API_KEY": self.api_key} if self.api_key else {},
@@ -37,10 +47,11 @@ class CodeAgent:
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         chunks.append(block.text)
+                        yield "assistant", block.text
 
         response_text = "".join(chunks)
         self.save_interaction(prompt, response_text)
-        return response_text
+        yield "__final__", response_text
 
     def save_interaction(self, input_text: str, output_text: str) -> None:
         self.memory.save({"input": input_text, "output": output_text})
