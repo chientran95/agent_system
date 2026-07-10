@@ -1,4 +1,4 @@
-.PHONY: install run-code-agent run-content-agent run-orchestrator check clean env example jaeger
+.PHONY: install run-code-agent run-research-agent run-orchestrator check clean env example jaeger
 
 # Install the project dependencies using uv.
 install:
@@ -6,12 +6,12 @@ install:
 	uv sync
 
 # Run each agent as its own process; start these in separate terminals,
-# code-agent and content-agent first since the orchestrator calls them over A2A.
+# code-agent and research-agent first since the orchestrator calls them over A2A.
 run-code-agent:
 	uv run code-agent
 
-run-content-agent:
-	uv run content-agent
+run-research-agent:
+	uv run research-agent
 
 run-orchestrator:
 	uv run orchestrator
