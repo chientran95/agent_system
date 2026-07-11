@@ -1,6 +1,11 @@
+from collections.abc import Callable
+from typing import TypeVar
+
 from .settings import LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY
 
 LANGFUSE_CONFIGURED = bool(LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY)
+
+F = TypeVar("F", bound=Callable)
 
 
 def get_langchain_callbacks() -> list:
@@ -17,14 +22,20 @@ def get_langchain_callbacks() -> list:
     return [CallbackHandler()]
 
 
-def configure_litellm() -> None:
-    """Enables litellm's built-in Langfuse callback, for raw
-    litellm.completion() calls that don't go through a LangChain Runnable
-    (e.g. ContentAgent.verify_draft's rubric check). No-op if unconfigured."""
+def trace_generation(name: str) -> Callable[[F], F]:
+    """Wraps a raw (non-LangChain) LLM-calling function - e.g. a direct
+    litellm.completion() call - as a Langfuse "generation" span. No-op if
+    Langfuse isn't configured.
+
+    litellm has a built-in "langfuse" callback, but it's written against the
+    old Langfuse v2 SDK (langfuse.version.__version__, removed in v4) - and
+    v2 itself doesn't work with our modern LangChain (langchain.callbacks.base
+    was removed in LangChain 1.x). This decorator avoids that broken bridge
+    entirely by using Langfuse's own generic instrumentation.
+    """
     if not LANGFUSE_CONFIGURED:
-        return
+        return lambda func: func
 
-    import litellm
+    from langfuse import observe
 
-    litellm.success_callback = ["langfuse"]
-    litellm.failure_callback = ["langfuse"]
+    return observe(name=name, as_type="generation")

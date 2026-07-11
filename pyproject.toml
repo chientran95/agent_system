@@ -26,7 +26,7 @@ dependencies = [
   "litellm>=1.90.3",
   "langchain-ollama>=1.1.0",
   "ddgs>=9.14.4",
-  "langfuse>=4.13.2",
+  "langfuse>=4",
 ]
 
 [project.scripts]
