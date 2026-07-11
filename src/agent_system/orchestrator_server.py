@@ -11,7 +11,7 @@ AGENTS_DIR = str(Path(__file__).resolve().parent / "orchestrator_agents")
 
 
 def create_app() -> FastAPI:
-    init_tracing(service_name="orchestrator")
+    init_tracing(service_name="orchestrator", also_export_to_langfuse=True)
     app = get_fast_api_app(agents_dir=AGENTS_DIR, web=True)
     instrument_app(app)
     return app

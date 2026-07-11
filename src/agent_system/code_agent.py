@@ -5,7 +5,23 @@ from typing import Any
 
 from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
 
-from .settings import CLAUDE_MODEL
+from .settings import CLAUDE_MODEL, OTEL_EXPORTER_OTLP_ENDPOINT
+
+# Claude Code's own native OpenTelemetry telemetry (distributed trace spans
+# for its internal tool calls/model turns), exported to the same Jaeger
+# instance our own services use. See:
+# https://code.claude.com/docs/en/monitoring-usage
+_CLAUDE_CODE_OTEL_ENV = {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",  # required for trace spans, not just metrics/logs
+    "OTEL_TRACES_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": OTEL_EXPORTER_OTLP_ENDPOINT,
+    "OTEL_SERVICE_NAME": "claude_code_cli",
+    "OTEL_LOG_USER_PROMPTS": "1",
+    "OTEL_LOG_TOOL_DETAILS": "1",
+    "OTEL_LOG_TOOL_CONTENT": "1",
+}
 
 
 class InMemorySaver:
@@ -36,10 +52,11 @@ class CodeAgent:
         """Streams ("assistant", text) chunks from Claude as it generates
         code, in the same incremental pieces the SDK itself produces. The
         final tuple has kind == "__final__" and text == the full response."""
-        options = ClaudeAgentOptions(
-            model=self.model,
-            env={"ANTHROPIC_API_KEY": self.api_key} if self.api_key else {},
-        )
+        env = dict(_CLAUDE_CODE_OTEL_ENV)
+        if self.api_key:
+            env["ANTHROPIC_API_KEY"] = self.api_key
+
+        options = ClaudeAgentOptions(model=self.model, env=env)
 
         chunks: list[str] = []
         async for message in query(prompt=prompt, options=options):

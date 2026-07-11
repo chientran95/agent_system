@@ -12,6 +12,10 @@ CHECKPOINT_DB = Path(os.getenv("AGENT_CHECKPOINT_DB", ROOT / "state" / "checkpoi
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
 
+# Shared OTLP endpoint: our own OpenTelemetry pipeline (a2a_tracing.py) and
+# the Claude Code CLI's native telemetry (see code_agent.py) both export here.
+OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+
 # Orchestrator + research/content agents: local Ollama model. Note the two libraries
 # expect different provider-prefix conventions for the same model name:
 # litellm (used directly, and via ADK's LiteLlm) wants "ollama_chat/<model>",
@@ -22,12 +26,12 @@ LANGCHAIN_OLLAMA_MODEL = f"ollama:{OLLAMA_MODEL}"
 
 # LLM-semantic observability for the LangChain-based agents (content_agent's
 # graph, research_agent's deepagents graph, and litellm's raw completion
-# calls). Complements Jaeger, which only sees the generic HTTP/A2A layer.
-# LANGFUSE_BASE_URL is read directly from the environment by the Langfuse
-# SDK itself, so it isn't re-exposed here - only the keys gate whether we
-# attach callbacks at all.
+# calls), and optionally for the orchestrator (ADK emits its own gen_ai.*
+# OpenTelemetry spans natively - see a2a_tracing.py's also_export_to_langfuse).
+# Complements Jaeger, which only sees the generic HTTP/A2A layer.
 LANGFUSE_PUBLIC_KEY = os.getenv("LANGFUSE_PUBLIC_KEY")
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY")
+LANGFUSE_BASE_URL = os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com")
 
 ADK_DEV_UI = os.getenv("ADK_DEV_UI", "http://localhost:3000")
 
