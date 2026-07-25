@@ -109,10 +109,12 @@ curl -s -X POST "http://localhost:8000/apps/orchestrator/users/tester/sessions/s
   -H "Content-Type: application/json" -d '{}'
 ```
 
+Both routes below use `/run_sse` (streaming) rather than `/run` (blocking) - `-N` disables curl's output buffering so events print as they arrive instead of all at once at the end. Swap in `/run` with plain `-s` if you'd rather wait for one final JSON array.
+
 ### Route 1: coding request → coding_agent
 
 ```bash
-curl -s -X POST "http://localhost:8000/run" -H "Content-Type: application/json" -d '{
+curl -N -s -X POST "http://localhost:8000/run_sse" -H "Content-Type: application/json" -d '{
   "appName": "orchestrator",
   "userId": "tester",
   "sessionId": "s1",
@@ -123,7 +125,7 @@ curl -s -X POST "http://localhost:8000/run" -H "Content-Type: application/json" 
 }' --max-time 90
 ```
 
-The response is a JSON array of ADK events. Look for an event with `"functionCall": {"name": "transfer_to_agent", "args": {"agent_name": "coding_agent"}}` confirming the routing decision, followed by an event authored by `coding_agent` with the generated code.
+Each line is a separate `data: {...}` SSE event as the orchestrator works. Look for one with `"functionCall": {"name": "transfer_to_agent", "args": {"agent_name": "coding_agent"}}` confirming the routing decision, followed by an event authored by `coding_agent` with the generated code.
 
 ### Route 2: research/content request → research_agent
 
@@ -133,7 +135,7 @@ Create a fresh session first (session IDs shouldn't be reused across unrelated r
 curl -s -X POST "http://localhost:8000/apps/orchestrator/users/tester/sessions/s2" \
   -H "Content-Type: application/json" -d '{}'
 
-curl -s -X POST "http://localhost:8000/run" -H "Content-Type: application/json" -d '{
+curl -N -s -X POST "http://localhost:8000/run_sse" -H "Content-Type: application/json" -d '{
   "appName": "orchestrator",
   "userId": "tester",
   "sessionId": "s2",
@@ -148,7 +150,13 @@ Look for `"functionCall": {"name": "transfer_to_agent", "args": {"agent_name": "
 
 ### Pretty-printing responses
 
-Both `/run` calls return a JSON array that's easier to read piped through `jq`, e.g.:
+`/run_sse` emits one `data: {...}` line per event, which reads better stripped and piped through `jq`:
+
+```bash
+curl -N -s -X POST "http://localhost:8000/run_sse" ... | sed -n 's/^data: //p' | jq -r '"--- \(.author) ---\n\(.content.parts[]?.text // .content.parts[]?.functionCall // empty)"'
+```
+
+For `/run` (blocking) instead, the whole response is one JSON array:
 
 ```bash
 curl -s -X POST "http://localhost:8000/run" ... | jq -r '.[] | "--- \(.author) ---\n\(.content.parts[]?.text // .content.parts[]?.functionCall // empty)"'
@@ -158,5 +166,7 @@ curl -s -X POST "http://localhost:8000/run" ... | jq -r '.[] | "--- \(.author) -
 
 ## Tracing
 
-- **Jaeger** (`http://localhost:16686`): select service `code_agent_a2a`, `research_agent_a2a`, or `orchestrator` from the dropdown to see the HTTP/A2A-level trace for any of the above requests. Routing through the orchestrator (rather than hitting an agent directly) produces a single trace spanning both services.
-- **Langfuse** (your project dashboard, if configured): shows prompt/completion-level detail for `research_agent` and its `content_writer` subagent - not `code_agent` (no LangChain involved there).
+- **Jaeger** (`http://localhost:16686`): select a service from the dropdown to see its trace -
+  - `orchestrator`, `code_agent_a2a`, `research_agent_a2a` - the generic A2A/HTTP layer for each service. Routing through the orchestrator (rather than hitting an agent directly) produces a single trace spanning both services.
+  - `claude_code_cli` - Claude Code's own internal trace spans (LLM turns, tool calls, token counts) for every `code_agent` request, independent of the A2A layer above.
+- **Langfuse** (your project dashboard, if configured): prompt/completion-level detail for `research_agent` and its `content_writer` subagent (via LangChain callbacks), plus the `orchestrator`'s own routing decisions (via a second OTLP export alongside Jaeger - trace structure and token counts, though not the raw prompt text, since ADK's span attributes don't match the naming Langfuse's OTLP mapper expects). Not `code_agent` - no LangChain/litellm call to hook into there.
