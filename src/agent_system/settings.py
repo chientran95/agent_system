@@ -16,13 +16,23 @@ CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
 # the Claude Code CLI's native telemetry (see code_agent.py) both export here.
 OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
 
-# Orchestrator + research/content agents: local Ollama model. Note the two libraries
-# expect different provider-prefix conventions for the same model name:
-# litellm (used directly, and via ADK's LiteLlm) wants "ollama_chat/<model>",
-# while langchain's init_chat_model (used by deepagents) wants "ollama:<model>".
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b")
-LITELLM_OLLAMA_MODEL = f"ollama_chat/{OLLAMA_MODEL}"
-LANGCHAIN_OLLAMA_MODEL = f"ollama:{OLLAMA_MODEL}"
+# Each of the four Ollama-backed agents (orchestrator, content_agent
+# subagent, research_agent, weather_agent) has its own independently
+# configurable model - no shared default, so tuning one doesn't affect the
+# others. Note two libraries expect different provider-prefix conventions
+# for the same model name: litellm (used directly, and via ADK's LiteLlm)
+# wants "ollama_chat/<model>", while langchain's init_chat_model (used by
+# deepagents) wants "ollama:<model>"; ChatOllama takes the raw name.
+ORCHESTRATOR_MODEL = os.getenv("ORCHESTRATOR_MODEL", "gpt-oss:20b")
+LITELLM_ORCHESTRATOR_MODEL = f"ollama_chat/{ORCHESTRATOR_MODEL}"
+
+CONTENT_AGENT_MODEL = os.getenv("CONTENT_AGENT_MODEL", "gpt-oss:20b")
+LITELLM_CONTENT_AGENT_MODEL = f"ollama_chat/{CONTENT_AGENT_MODEL}"
+
+RESEARCH_AGENT_MODEL = os.getenv("RESEARCH_AGENT_MODEL", "gpt-oss:20b")
+LANGCHAIN_RESEARCH_AGENT_MODEL = f"ollama:{RESEARCH_AGENT_MODEL}"
+
+WEATHER_AGENT_MODEL = os.getenv("WEATHER_AGENT_MODEL", "gpt-oss:20b")
 
 # LLM-semantic observability for the LangChain-based agents (content_agent's
 # graph, research_agent's deepagents graph, and litellm's raw completion
@@ -43,6 +53,12 @@ RESEARCH_AGENT_HOST = os.getenv("RESEARCH_AGENT_HOST", "localhost")
 RESEARCH_AGENT_PORT = int(os.getenv("RESEARCH_AGENT_PORT", "8002"))
 RESEARCH_AGENT_URL = os.getenv(
     "RESEARCH_AGENT_URL", f"http://{RESEARCH_AGENT_HOST}:{RESEARCH_AGENT_PORT}"
+)
+
+WEATHER_AGENT_HOST = os.getenv("WEATHER_AGENT_HOST", "localhost")
+WEATHER_AGENT_PORT = int(os.getenv("WEATHER_AGENT_PORT", "8003"))
+WEATHER_AGENT_URL = os.getenv(
+    "WEATHER_AGENT_URL", f"http://{WEATHER_AGENT_HOST}:{WEATHER_AGENT_PORT}"
 )
 
 ORCHESTRATOR_HOST = os.getenv("ORCHESTRATOR_HOST", "0.0.0.0")

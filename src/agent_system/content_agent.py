@@ -13,7 +13,7 @@ from langgraph.graph.message import add_messages
 from .langfuse_tracing import get_langchain_callbacks, trace_generation
 from .storage import FilesystemBackend
 from .state import DurableState
-from .settings import OLLAMA_MODEL, LITELLM_OLLAMA_MODEL, STORAGE_DIR, CHECKPOINT_DB
+from .settings import CONTENT_AGENT_MODEL, LITELLM_CONTENT_AGENT_MODEL, STORAGE_DIR, CHECKPOINT_DB
 
 DRAFT_SYSTEM_PROMPT = (
     "You are a blog-post writer. Using the research brief and notes provided "
@@ -69,9 +69,9 @@ class ContentAgent:
         self.storage = FilesystemBackend(storage_dir)
         self.state = DurableState(checkpoint_db)
         self.memory = SQLiteConversationMemory(checkpoint_db.with_name("content_memory.sqlite"))
-        self.model = ChatOllama(model=OLLAMA_MODEL)
+        self.model = ChatOllama(model=CONTENT_AGENT_MODEL)
         self.graph = self._build_graph()
-        print(f"ContentAgent initialized with LLM=ollama:{OLLAMA_MODEL}")
+        print(f"ContentAgent initialized with LLM=ollama:{CONTENT_AGENT_MODEL}")
 
     def _build_graph(self):
         graph = StateGraph(ContentState)
@@ -145,7 +145,7 @@ class ContentAgent:
             "Answer with only a compact JSON object with keys: verdict, issues, recommendations."
         )
         response = litellm.completion(
-            model=LITELLM_OLLAMA_MODEL,
+            model=LITELLM_CONTENT_AGENT_MODEL,
             messages=[{"role": "user", "content": prompt}],
         )
         response_text = response.choices[0].message.content

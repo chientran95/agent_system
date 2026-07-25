@@ -4,7 +4,7 @@ from langchain_core.tools import tool
 
 from .content_agent import ContentAgent
 from .langfuse_tracing import get_langchain_callbacks
-from .settings import LANGCHAIN_OLLAMA_MODEL
+from .settings import LANGCHAIN_RESEARCH_AGENT_MODEL
 
 RESEARCH_SYSTEM_PROMPT = (
     "You are a research agent with exactly two capabilities: the web_search "
@@ -38,12 +38,12 @@ class ResearchAgent:
     def __init__(self) -> None:
         self.content_agent = ContentAgent()
         self.client = create_deep_agent(
-            model=LANGCHAIN_OLLAMA_MODEL,
+            model=LANGCHAIN_RESEARCH_AGENT_MODEL,
             tools=[web_search],
             subagents=[self.content_agent.as_subagent()],
             system_prompt=RESEARCH_SYSTEM_PROMPT,
         )
-        print(f"ResearchAgent initialized with LLM={LANGCHAIN_OLLAMA_MODEL}")
+        print(f"ResearchAgent initialized with LLM={LANGCHAIN_RESEARCH_AGENT_MODEL}")
 
     def research_and_write(self, topic: str) -> str:
         print(f"ResearchAgent: researching topic:\n{topic}\n")

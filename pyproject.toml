@@ -27,9 +27,11 @@ dependencies = [
   "langchain-ollama>=1.1.0",
   "ddgs>=9.14.4",
   "langfuse>=4",
+  "langchain-mcp-adapters>=0.3.0",
 ]
 
 [project.scripts]
 orchestrator = "agent_system.orchestrator_server:main"
 code-agent = "agent_system.code_agent_server:main"
 research-agent = "agent_system.research_agent_server:main"
+weather-agent = "agent_system.weather_agent_server:main"
