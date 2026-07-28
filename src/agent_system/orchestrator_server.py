@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from google.adk.cli.fast_api import get_fast_api_app
 
 from .a2a_tracing import init_tracing, instrument_app
+from .orchestrator_resume_middleware import ResumePendingInputMiddleware
 from .settings import ORCHESTRATOR_HOST, ORCHESTRATOR_PORT
 
 AGENTS_DIR = str(Path(__file__).resolve().parent / "orchestrator_agents")
@@ -13,6 +14,7 @@ AGENTS_DIR = str(Path(__file__).resolve().parent / "orchestrator_agents")
 def create_app() -> FastAPI:
     init_tracing(service_name="orchestrator", also_export_to_langfuse=True)
     app = get_fast_api_app(agents_dir=AGENTS_DIR, web=True)
+    app.add_middleware(ResumePendingInputMiddleware)
     instrument_app(app)
     return app
 

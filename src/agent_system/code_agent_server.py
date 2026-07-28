@@ -8,6 +8,8 @@ from a2a.types import AgentCapabilities, AgentCard, AgentSkill, Part, TaskState,
 from a2a.utils import new_task
 from fastapi import FastAPI
 
+from .a2a_peer_client import get_incoming_call_depth
+from .a2a_queue_workaround import ResilientQueueManager
 from .a2a_tracing import init_tracing, instrument_app
 from .a2a_utils import get_original_user_text
 from .code_agent import CodeAgent
@@ -19,30 +21,55 @@ _PROGRESS_PREVIEW_CHARS = 300
 class CodeAgentExecutor(AgentExecutor):
     def __init__(self) -> None:
         self.agent = CodeAgent()
+        # task.id -> Claude session id, so a paused (input-required) task can
+        # resume the same underlying Claude session once answered.
+        self._sessions: dict[str, str] = {}
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-        prompt = get_original_user_text(context)
+        text = get_original_user_text(context)
+        call_depth = get_incoming_call_depth(context.message.metadata if context.message else None)
 
         task = context.current_task
+        is_resuming = bool(task) and task.status.state == TaskState.input_required
         if not task:
             task = new_task(context.message)
             await event_queue.enqueue_event(task)
         updater = TaskUpdater(event_queue, task.id, task.context_id)
         await updater.start_work()
 
+        resume_session_id = self._sessions.get(task.id) if is_resuming else None
+
         result_text = ""
-        async for kind, text in self.agent.astream_code_pipeline(prompt):
-            if kind == "__final__":
-                result_text = text
+        result_kind = "__final__"
+        session_id: str | None = None
+        async for kind, chunk_text, chunk_session_id in self.agent.astream_code_pipeline(
+            text, call_depth=call_depth, resume_session_id=resume_session_id
+        ):
+            if kind in ("__final__", "input_required"):
+                result_text = chunk_text
+                result_kind = kind
+                session_id = chunk_session_id
                 continue
-            preview = text if len(text) <= _PROGRESS_PREVIEW_CHARS else text[:_PROGRESS_PREVIEW_CHARS] + "…"
+            preview = (
+                chunk_text
+                if len(chunk_text) <= _PROGRESS_PREVIEW_CHARS
+                else chunk_text[:_PROGRESS_PREVIEW_CHARS] + "…"
+            )
             await updater.update_status(
                 TaskState.working,
                 message=updater.new_agent_message([Part(root=TextPart(text=preview))]),
             )
 
-        await updater.add_artifact([Part(root=TextPart(text=result_text))], name="generated_code")
-        await updater.complete()
+        if session_id:
+            self._sessions[task.id] = session_id
+
+        if result_kind == "input_required":
+            await updater.requires_input(
+                message=updater.new_agent_message([Part(root=TextPart(text=result_text))]),
+            )
+        else:
+            await updater.add_artifact([Part(root=TextPart(text=result_text))], name="generated_code")
+            await updater.complete()
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         raise NotImplementedError("The coding agent does not support cancelling in-flight requests.")
@@ -77,6 +104,7 @@ def create_app() -> FastAPI:
     handler = DefaultRequestHandler(
         agent_executor=CodeAgentExecutor(),
         task_store=InMemoryTaskStore(),
+        queue_manager=ResilientQueueManager(),
     )
     app = A2AFastAPIApplication(agent_card=agent_card, http_handler=handler).build()
     instrument_app(app)

@@ -99,23 +99,40 @@ class WeatherAgent:
         self._graph = graph.compile(checkpointer=self.checkpointer)
         return self._graph
 
-    async def ainvoke(self, query: str, thread_id: str) -> dict[str, Any]:
-        """Starts a new run. thread_id doubles as the A2A task ID, so a
-        paused run can be resumed by referencing the same task."""
-        graph = await self._ensure_graph()
-        config = {"configurable": {"thread_id": thread_id}, "callbacks": get_langchain_callbacks()}
-        result = await graph.ainvoke({"messages": [HumanMessage(content=query)]}, config=config)
-        return self._interpret_result(result)
+    async def astream_query(self, query: str, thread_id: str):
+        """Starts a new run, streaming (node_name, text) progress chunks as
+        the agent works. thread_id doubles as the A2A task ID, so a paused
+        run can be resumed by referencing the same task. The final yield is
+        either ("__final__", answer) on completion, or ("input_required",
+        question) if the ask_user tool paused the run - pass the same
+        thread_id to aresume_query to continue after answering."""
+        async for item in self._astream_graph({"messages": [HumanMessage(content=query)]}, thread_id):
+            yield item
 
-    async def aresume(self, answer: str, thread_id: str) -> dict[str, Any]:
+    async def aresume_query(self, answer: str, thread_id: str):
         """Resumes a run previously paused by the ask_user tool."""
+        async for item in self._astream_graph(Command(resume=answer), thread_id):
+            yield item
+
+    async def _astream_graph(self, input_value, thread_id: str):
         graph = await self._ensure_graph()
         config = {"configurable": {"thread_id": thread_id}, "callbacks": get_langchain_callbacks()}
-        result = await graph.ainvoke(Command(resume=answer), config=config)
-        return self._interpret_result(result)
-
-    def _interpret_result(self, result: dict[str, Any]) -> dict[str, Any]:
-        interrupts = result.get("__interrupt__")
-        if interrupts:
-            return {"status": "input_required", "question": interrupts[0].value}
-        return {"status": "completed", "answer": result["messages"][-1].content}
+        final_text = ""
+        interrupted_question: str | None = None
+        async for chunk in graph.astream(input_value, stream_mode="updates", config=config):
+            for node_name, node_output in (chunk or {}).items():
+                if node_name == "__interrupt__":
+                    interrupted_question = node_output[0].value if node_output else "More information needed."
+                    continue
+                messages = node_output.get("messages", []) if isinstance(node_output, dict) else []
+                for message in messages:
+                    text = getattr(message, "content", "") or ""
+                    if not text:
+                        continue
+                    if getattr(message, "type", None) == "ai":
+                        final_text = text
+                    yield node_name, text
+        if interrupted_question is not None:
+            yield "input_required", interrupted_question
+        else:
+            yield "__final__", final_text

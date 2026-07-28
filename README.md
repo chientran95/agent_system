@@ -73,6 +73,23 @@ The weather agent can pause mid-request and ask a clarifying question, rather th
 
 See [TESTING.md](TESTING.md) for a full worked example. Caveat: how reliably the model *acts correctly* once resumed varies by which Ollama model you're running - the pause/resume mechanism itself is solid, but small local models don't always follow through cleanly after a clarifying answer (this mirrors similar reliability findings for `research_agent`'s subagent delegation elsewhere in this project).
 
+## Agent mesh
+
+Beyond the orchestrator's hub-and-spoke routing, agents can call each other directly (peer-to-peer) over A2A - e.g. `research_agent` can delegate a code-writing step straight to `coding_agent` mid-task, without going back through the orchestrator. This is implemented in `a2a_peer_client.py`:
+
+- **`call_peer_agent(url, text, call_depth)`** sends a single A2A `message/send` to another agent and returns its final text, or raises `PeerInputRequired` if the callee paused (`input-required`) instead of completing.
+- **Call-depth limiting**: every mesh call increments a `mesh_call_depth` counter carried in the A2A message metadata; calls that would exceed `MAX_MESH_CALL_DEPTH` (10) are refused with `MeshDepthExceeded`, guarding against call cycles between agents.
+- **Bubbling paused state across hops**: if a callee pauses (e.g. `coding_agent` needs a clarifying answer while `research_agent` delegated to it), the caller doesn't swallow that - `research_agent`'s side calls LangGraph's `interrupt()` so its *own* task pauses too, propagating the `input-required` state up to whoever called it, however many hops away. Answering the outermost paused task threads the answer back down and resumes the original call.
+
+### Agent discovery: Curated Registry + Direct Configuration
+
+Both discovery strategies are wired up side by side, deliberately, so each can be exercised independently:
+
+- **Curated Registry** (`agent_registry.py` / `agent_registry.json`): a maintainer-curated JSON file mapping each agent's `AgentCard` name to its base URL and description. `lookup_agent_url(name)` reads it; returns `None` if the agent isn't listed.
+- **Direct Configuration**: the existing `*_AGENT_URL` settings in `settings.py`, sourced from env vars.
+
+Every discovery site - the mesh's `call_peer_agent_by_name(name, fallback_url, ...)` and the orchestrator's `RemoteA2aAgent` construction in `orchestrator_agents/orchestrator/agent.py` - tries the registry first and falls back to Direct Configuration if the agent isn't registered. Editing `agent_registry.json` changes routing with no code changes; deleting an agent's entry from it (or the whole file) falls back to Direct Configuration with no errors.
+
 ## Storage
 
 - `storage/`: local filesystem backend for drafts, notes, and intermediate content

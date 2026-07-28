@@ -8,10 +8,13 @@ from a2a.types import AgentCapabilities, AgentCard, AgentSkill, Part, TaskState,
 from a2a.utils import new_task
 from fastapi import FastAPI
 
+from .a2a_queue_workaround import ResilientQueueManager
 from .a2a_tracing import init_tracing, instrument_app
 from .a2a_utils import get_original_user_text
 from .settings import WEATHER_AGENT_HOST, WEATHER_AGENT_PORT, WEATHER_AGENT_URL
 from .weather_agent import WeatherAgent
+
+_PROGRESS_PREVIEW_CHARS = 300
 
 
 class WeatherAgentExecutor(AgentExecutor):
@@ -33,17 +36,34 @@ class WeatherAgentExecutor(AgentExecutor):
         # The A2A task ID doubles as the LangGraph thread ID, so resuming a
         # paused task continues the same checkpointed graph state.
         if is_resuming:
-            result = await self.agent.aresume(text, thread_id=task.id)
+            stream = self.agent.aresume_query(text, thread_id=task.id)
         else:
-            result = await self.agent.ainvoke(text, thread_id=task.id)
+            stream = self.agent.astream_query(text, thread_id=task.id)
 
-        if result["status"] == "input_required":
+        result_kind = "__final__"
+        result_text = ""
+        async for kind, chunk_text in stream:
+            if kind in ("__final__", "input_required"):
+                result_kind = kind
+                result_text = chunk_text
+                continue
+            preview = (
+                chunk_text
+                if len(chunk_text) <= _PROGRESS_PREVIEW_CHARS
+                else chunk_text[:_PROGRESS_PREVIEW_CHARS] + "…"
+            )
+            await updater.update_status(
+                TaskState.working,
+                message=updater.new_agent_message([Part(root=TextPart(text=f"[{kind}] {preview}"))]),
+            )
+
+        if result_kind == "input_required":
             await updater.requires_input(
-                message=updater.new_agent_message([Part(root=TextPart(text=result["question"]))]),
+                message=updater.new_agent_message([Part(root=TextPart(text=result_text))]),
             )
         else:
             await updater.complete(
-                message=updater.new_agent_message([Part(root=TextPart(text=result["answer"]))]),
+                message=updater.new_agent_message([Part(root=TextPart(text=result_text))]),
             )
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
@@ -61,7 +81,7 @@ def build_agent_card() -> AgentCard:
         ),
         url=WEATHER_AGENT_URL,
         version="0.1.0",
-        capabilities=AgentCapabilities(streaming=False),
+        capabilities=AgentCapabilities(streaming=True),
         defaultInputModes=["text"],
         defaultOutputModes=["text"],
         skills=[
@@ -84,6 +104,7 @@ def create_app() -> FastAPI:
     handler = DefaultRequestHandler(
         agent_executor=WeatherAgentExecutor(),
         task_store=InMemoryTaskStore(),
+        queue_manager=ResilientQueueManager(),
     )
     app = A2AFastAPIApplication(agent_card=agent_card, http_handler=handler).build()
     instrument_app(app)

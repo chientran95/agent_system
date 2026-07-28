@@ -1,0 +1,14 @@
+{
+  "coding_agent": {
+    "url": "http://localhost:8001",
+    "description": "Generates and edits code using an Anthropic model via the Claude Agent SDK."
+  },
+  "research_agent": {
+    "url": "http://localhost:8002",
+    "description": "Researches a topic via web search, then delegates to an internal content-writing subagent to produce a blog post."
+  },
+  "weather_agent": {
+    "url": "http://localhost:8003",
+    "description": "Answers weather, forecast, air quality, marine, and climate questions using the Open-Meteo MCP server."
+  }
+}

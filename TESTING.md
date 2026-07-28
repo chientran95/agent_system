@@ -9,7 +9,7 @@ uv run weather-agent     # http://localhost:8003
 uv run orchestrator      # http://localhost:8000
 ```
 
-The three A2A servers (`code-agent`, `research-agent`, `weather-agent`) speak JSON-RPC 2.0 over `POST /`, with `message/send` for a single blocking response or `message/stream` (SSE) for live progress. `code-agent` and `research-agent` are streaming-capable; `weather-agent` is `message/send`-only for now (see its section below). The orchestrator is a different shape entirely: it's ADK's own session-based REST API (`get_fast_api_app`), not raw A2A.
+The three A2A servers (`code-agent`, `research-agent`, `weather-agent`) speak JSON-RPC 2.0 over `POST /`, with `message/send` for a single blocking response or `message/stream` (SSE) for live progress - all three are streaming-capable. The orchestrator is a different shape entirely: it's ADK's own session-based REST API (`get_fast_api_app`), not raw A2A.
 
 ---
 
@@ -118,6 +118,25 @@ curl -s -X POST http://localhost:8003/ -H "Content-Type: application/json" -d '{
 ```
 
 Worth watching in the response: which tool it picks (`weather_forecast` vs a national-model tool like `jma_forecast`), and whether it calls `geocoding` first to resolve the place name into coordinates before calling a forecast tool - both are real, observed points of variability with local models, not guaranteed to go the same way every run.
+
+### The same query, streaming
+
+```bash
+curl -N -s -X POST http://localhost:8003/ -H "Content-Type: application/json" -d '{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "method": "message/stream",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [{"kind": "text", "text": "What is the current weather in Tokyo, Japan?"}],
+      "messageId": "msg-1"
+    }
+  }
+}' --max-time 90
+```
+
+Each `agent` node turn and `tools` node turn (the geocoding/forecast tool results) streams as its own `TaskState.working` event before the final `completed` event with the answer.
 
 ### An underspecified query (triggers input-required)
 

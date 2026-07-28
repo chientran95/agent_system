@@ -8,6 +8,8 @@ from a2a.types import AgentCapabilities, AgentCard, AgentSkill, Part, TaskState,
 from a2a.utils import new_task
 from fastapi import FastAPI
 
+from .a2a_peer_client import get_incoming_call_depth
+from .a2a_queue_workaround import ResilientQueueManager
 from .a2a_tracing import init_tracing, instrument_app
 from .a2a_utils import get_original_user_text
 from .research_agent import ResearchAgent
@@ -21,28 +23,48 @@ class ResearchAgentExecutor(AgentExecutor):
         self.agent = ResearchAgent()
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
-        topic = get_original_user_text(context)
+        text = get_original_user_text(context)
+        call_depth = get_incoming_call_depth(context.message.metadata if context.message else None)
 
         task = context.current_task
+        is_resuming = bool(task) and task.status.state == TaskState.input_required
         if not task:
             task = new_task(context.message)
             await event_queue.enqueue_event(task)
         updater = TaskUpdater(event_queue, task.id, task.context_id)
         await updater.start_work()
 
+        # The A2A task ID doubles as the LangGraph thread ID, so resuming a
+        # paused task continues the same checkpointed graph state.
+        if is_resuming:
+            stream = self.agent.aresume_research(text, thread_id=task.id, call_depth=call_depth)
+        else:
+            stream = self.agent.astream_research(text, thread_id=task.id, call_depth=call_depth)
+
+        result_kind = "__final__"
         result_text = ""
-        async for node_name, text in self.agent.astream_research(topic):
-            if node_name == "__final__":
-                result_text = text
+        async for kind, chunk_text in stream:
+            if kind in ("__final__", "input_required"):
+                result_kind = kind
+                result_text = chunk_text
                 continue
-            preview = text if len(text) <= _PROGRESS_PREVIEW_CHARS else text[:_PROGRESS_PREVIEW_CHARS] + "…"
+            preview = (
+                chunk_text
+                if len(chunk_text) <= _PROGRESS_PREVIEW_CHARS
+                else chunk_text[:_PROGRESS_PREVIEW_CHARS] + "…"
+            )
             await updater.update_status(
                 TaskState.working,
-                message=updater.new_agent_message([Part(root=TextPart(text=f"[{node_name}] {preview}"))]),
+                message=updater.new_agent_message([Part(root=TextPart(text=f"[{kind}] {preview}"))]),
             )
 
-        await updater.add_artifact([Part(root=TextPart(text=result_text))], name="blog_post")
-        await updater.complete()
+        if result_kind == "input_required":
+            await updater.requires_input(
+                message=updater.new_agent_message([Part(root=TextPart(text=result_text))]),
+            )
+        else:
+            await updater.add_artifact([Part(root=TextPart(text=result_text))], name="blog_post")
+            await updater.complete()
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         raise NotImplementedError("The research agent does not support cancelling in-flight requests.")
@@ -77,6 +99,7 @@ def create_app() -> FastAPI:
     handler = DefaultRequestHandler(
         agent_executor=ResearchAgentExecutor(),
         task_store=InMemoryTaskStore(),
+        queue_manager=ResilientQueueManager(),
     )
     app = A2AFastAPIApplication(agent_card=agent_card, http_handler=handler).build()
     instrument_app(app)
