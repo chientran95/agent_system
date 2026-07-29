@@ -9,6 +9,7 @@ from langgraph.graph import StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.types import Command, interrupt
+from pydantic import BaseModel, Field
 
 from .langfuse_tracing import get_langchain_callbacks
 from .settings import WEATHER_AGENT_MODEL
@@ -52,9 +53,40 @@ _MCP_SERVER_CONFIG = {
     }
 }
 
+# geocoding is needed by almost every query (forecast tools take lat/lon, not
+# place names) and its schema is tiny, so it's always bound rather than left
+# to the first-pass selector to remember.
+_ALWAYS_INCLUDED_TOOL_NAMES = {"geocoding"}
+_MAX_SELECTED_TOOLS = 3
+
+TOOL_SELECTOR_SYSTEM_PROMPT = (
+    "You are choosing which weather-data tools a downstream agent will need "
+    "to answer the user's request. You are shown each tool's name and "
+    "description only (not its full parameters). geocoding is always "
+    "available separately, so don't worry about picking it here - focus "
+    "only on which weather-data tool(s) are actually needed.\n\n"
+    f"Pick at most {_MAX_SELECTED_TOOLS} tools - usually just one is enough. "
+    "Choose exact names only from the list below."
+)
+
+
+class ToolSelection(BaseModel):
+    """Structured output for the cheap first-pass tool-selection call."""
+
+    tool_names: list[str] = Field(
+        description=(
+            f"Names of up to {_MAX_SELECTED_TOOLS} tools, chosen only from the "
+            "provided list, most relevant to the user's request."
+        )
+    )
+
 
 class WeatherState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
+    # Tool names only, not BaseTool objects - the checkpointer serializes
+    # state after every step, and StructuredTool instances aren't
+    # msgpack-serializable.
+    selected_tool_names: list[str]
 
 
 @tool
@@ -85,19 +117,56 @@ class WeatherAgent:
             return self._graph
 
         mcp_tools = await self.mcp_client.get_tools()
-        tools = [*mcp_tools, ask_user]
-        model_with_tools = self.model.bind_tools(tools)
+        always_included = [t for t in mcp_tools if t.name in _ALWAYS_INCLUDED_TOOL_NAMES]
+        selectable = [t for t in mcp_tools if t.name not in _ALWAYS_INCLUDED_TOOL_NAMES]
+        selectable_by_name = {t.name: t for t in selectable}
+        selector_model = self.model.with_structured_output(ToolSelection)
+
+        async def select_tools_node(state: WeatherState) -> dict[str, Any]:
+            """Cheap first pass: shows only tool name+description (not full
+            parameter schemas) so even a small-context model can see every
+            candidate at once, then narrows to a handful of tools whose full
+            (much larger) schemas get bound for the actual agent turn below.
+            See docs/BUG_WEATHER_TOOL_SELECTION.md for why this exists."""
+            tool_list_text = "\n".join(f"- {t.name}: {t.description}" for t in selectable)
+            try:
+                selection = await selector_model.ainvoke(
+                    [
+                        SystemMessage(content=f"{TOOL_SELECTOR_SYSTEM_PROMPT}\n\n{tool_list_text}"),
+                        *state["messages"],
+                    ]
+                )
+                selected_names = [
+                    name for name in dict.fromkeys(selection.tool_names) if name in selectable_by_name
+                ][:_MAX_SELECTED_TOOLS]
+            except Exception:
+                selected_names = []
+            if not selected_names:
+                # Selector produced nothing usable - fall back to the
+                # general-purpose tool rather than leaving the agent with no
+                # weather-data tool at all.
+                selected_names = ["weather_forecast"] if "weather_forecast" in selectable_by_name else []
+            return {"selected_tool_names": selected_names}
 
         async def agent_node(state: WeatherState) -> dict[str, Any]:
+            selected = [
+                selectable_by_name[name]
+                for name in state.get("selected_tool_names", [])
+                if name in selectable_by_name
+            ]
+            tools_for_turn = [*always_included, *selected, ask_user]
+            model_with_tools = self.model.bind_tools(tools_for_turn)
             response = await model_with_tools.ainvoke(
                 [SystemMessage(content=WEATHER_SYSTEM_PROMPT), *state["messages"]]
             )
             return {"messages": [response]}
 
         graph = StateGraph(WeatherState)
+        graph.add_node("select_tools", select_tools_node)
         graph.add_node("agent", agent_node)
-        graph.add_node("tools", ToolNode(tools))
-        graph.set_entry_point("agent")
+        graph.add_node("tools", ToolNode([*mcp_tools, ask_user]))
+        graph.set_entry_point("select_tools")
+        graph.add_edge("select_tools", "agent")
         graph.add_conditional_edges("agent", tools_condition)
         graph.add_edge("tools", "agent")
         self._graph = graph.compile(checkpointer=self.checkpointer)

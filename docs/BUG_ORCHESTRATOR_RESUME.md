@@ -28,6 +28,7 @@ This code path is explicitly marked experimental by ADK itself:
   - First call (ambiguous request): `HTTP 200`, correctly reaches `input-required` state.
   - Second call (the resume, same session, plain-text answer): `HTTP 200`, **0 bytes** in the response body, no error in any log.
 - Confirmed via debug instrumentation that `LiteLlm.generate_content_async()` — the method that actually calls the LLM — is **never invoked at all** during the failing resume turn.
+- **Recurrence confirmed with `weather_agent`**: after the tool-selection work in `docs/BUG_WEATHER_TOOL_SELECTION.md` got `weather_agent` far enough to genuinely reach `input-required` (asking a clarifying question) via the ADK Dev UI, resuming it hit the identical signature — `input-required` reached correctly, then `Queue is closed. Event will not be dequeued.` logged and no further output. Same bug, same symptom, different sub-agent — consistent with this being a generic `RemoteA2aAgent` issue rather than anything `code_agent`-specific.
 
 ## Tried fixes / investigation
 
