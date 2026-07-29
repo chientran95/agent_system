@@ -3,6 +3,7 @@ __pycache__/
 *.sqlite
 storage/
 state/
+.adk/
 .env
 .vscode/
 .DS_Store

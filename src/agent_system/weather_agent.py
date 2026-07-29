@@ -131,6 +131,14 @@ class WeatherAgent:
                 messages = node_output.get("messages", []) if isinstance(node_output, dict) else []
                 for message in messages:
                     text = getattr(message, "content", "") or ""
+                    tool_calls = getattr(message, "tool_calls", None) or []
+                    if not text and tool_calls:
+                        # A tool-calling turn normally has empty content (the
+                        # decision lives in tool_calls instead) - surface it
+                        # as a progress chunk too, so it isn't invisible.
+                        text = "; ".join(
+                            f"{tc.get('name')}({tc.get('args')})" for tc in tool_calls
+                        )
                     if not text:
                         continue
                     if getattr(message, "type", None) == "ai":
