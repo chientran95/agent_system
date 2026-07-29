@@ -69,7 +69,11 @@ def ask_user(question: str) -> str:
 class WeatherAgent:
     def __init__(self) -> None:
         self.mcp_client = MultiServerMCPClient(_MCP_SERVER_CONFIG)
-        self.model = ChatOllama(model=WEATHER_AGENT_MODEL)
+        # The Open-Meteo MCP server's 17 tool schemas alone run to ~40K
+        # tokens; Ollama silently truncates to its default 4096-token
+        # context if not told otherwise, which drops the tool definitions
+        # entirely and makes the model think it has no tools available.
+        self.model = ChatOllama(model=WEATHER_AGENT_MODEL, num_ctx=65536)
         self.checkpointer = InMemorySaver()
         self._graph = None
         print(f"WeatherAgent initialized with LLM=ollama:{WEATHER_AGENT_MODEL}")
