@@ -14,8 +14,8 @@ from .settings import CODE_AGENT_URL, LANGCHAIN_RESEARCH_AGENT_MODEL
 
 RESEARCH_SYSTEM_PROMPT = (
     "You are a research agent with these capabilities: the web_search tool, "
-    "a content_writer subagent, and a call_code_agent tool. Follow this "
-    "procedure:\n"
+    "a content_writer subagent, a call_code_agent tool, and an ask_user "
+    "tool. Follow this procedure:\n"
     "1. Call the web_search tool yourself, directly, one or more times, to "
     "gather facts and sources about the topic. Do not delegate this step to "
     "any subagent.\n"
@@ -27,7 +27,13 @@ RESEARCH_SYSTEM_PROMPT = (
     "findings, sources, and any generated code as the task description.\n"
     "4. Return the content_writer subagent's blog post as your final "
     "answer, unchanged - do not summarize, rewrite, or add commentary.\n"
-    "Never use the general-purpose subagent for any part of this workflow."
+    "Never use the general-purpose subagent for any part of this workflow.\n\n"
+    "Only call ask_user when the topic is genuinely too vague or ambiguous "
+    "to research meaningfully (e.g. no real subject given, or a term that's "
+    "ambiguous enough to materially change what you'd research). For "
+    "anything else - scope, angle, length, level of detail - just make a "
+    "sensible choice yourself and proceed; never ask about things you can "
+    "reasonably infer or default."
 )
 
 _MAX_CLARIFICATION_ROUNDS = 3
@@ -42,6 +48,15 @@ def web_search(query: str, max_results: int = 5) -> str:
     return "\n".join(
         f"- {r.get('title')}\n  {r.get('href')}\n  {r.get('body')}" for r in results
     )
+
+
+@tool
+def ask_user(question: str) -> str:
+    """Ask the user a clarifying question when the research topic is too
+    vague or ambiguous to research meaningfully. Use only when you
+    genuinely cannot proceed - not for information you can reasonably
+    infer or default."""
+    return interrupt(question)
 
 
 @tool
@@ -69,7 +84,7 @@ class ResearchAgent:
         self.checkpointer = InMemorySaver()
         self.client = create_deep_agent(
             model=LANGCHAIN_RESEARCH_AGENT_MODEL,
-            tools=[web_search, call_code_agent],
+            tools=[web_search, call_code_agent, ask_user],
             subagents=[self.content_agent.as_subagent()],
             system_prompt=RESEARCH_SYSTEM_PROMPT,
             checkpointer=self.checkpointer,
@@ -118,6 +133,14 @@ class ResearchAgent:
                 messages = node_output.get("messages", []) if isinstance(node_output, dict) else []
                 for message in messages:
                     text = getattr(message, "content", "") or ""
+                    tool_calls = getattr(message, "tool_calls", None) or []
+                    if not text and tool_calls:
+                        # A tool-calling turn normally has empty content (the
+                        # decision lives in tool_calls instead) - surface it
+                        # as a progress chunk too, so it isn't invisible.
+                        text = "; ".join(
+                            f"{tc.get('name')}({tc.get('args')})" for tc in tool_calls
+                        )
                     if not text:
                         continue
                     if getattr(message, "type", None) == "ai":

@@ -3,7 +3,7 @@ from typing import Annotated, Any, TypedDict
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_ollama import ChatOllama
+from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph
 from langgraph.graph.message import add_messages
@@ -12,7 +12,7 @@ from langgraph.types import Command, interrupt
 from pydantic import BaseModel, Field
 
 from .langfuse_tracing import get_langchain_callbacks
-from .settings import WEATHER_AGENT_MODEL
+from .settings import NVIDIA_API_KEY, WEATHER_AGENT_MODEL
 
 WEATHER_SYSTEM_PROMPT = (
     "You are a weather assistant with access to many specialized forecast "
@@ -101,14 +101,17 @@ def ask_user(question: str) -> str:
 class WeatherAgent:
     def __init__(self) -> None:
         self.mcp_client = MultiServerMCPClient(_MCP_SERVER_CONFIG)
-        # The Open-Meteo MCP server's 17 tool schemas alone run to ~40K
-        # tokens; Ollama silently truncates to its default 4096-token
-        # context if not told otherwise, which drops the tool definitions
-        # entirely and makes the model think it has no tools available.
-        self.model = ChatOllama(model=WEATHER_AGENT_MODEL, num_ctx=65536)
+        self.model = ChatNVIDIA(
+            model=WEATHER_AGENT_MODEL,
+            api_key=NVIDIA_API_KEY,
+            temperature=1,
+            top_p=1,
+            max_tokens=16384,
+            seed=42,
+        )
         self.checkpointer = InMemorySaver()
         self._graph = None
-        print(f"WeatherAgent initialized with LLM=ollama:{WEATHER_AGENT_MODEL}")
+        print(f"WeatherAgent initialized with LLM=nvidia:{WEATHER_AGENT_MODEL}")
 
     async def _ensure_graph(self):
         """Builds the graph lazily, since loading MCP tools is async and we

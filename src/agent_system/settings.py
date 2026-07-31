@@ -16,13 +16,13 @@ CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
 # the Claude Code CLI's native telemetry (see code_agent.py) both export here.
 OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
 
-# Each of the four Ollama-backed agents (orchestrator, content_agent
-# subagent, research_agent, weather_agent) has its own independently
-# configurable model - no shared default, so tuning one doesn't affect the
-# others. Note two libraries expect different provider-prefix conventions
-# for the same model name: litellm (used directly, and via ADK's LiteLlm)
-# wants "ollama_chat/<model>", while langchain's init_chat_model (used by
-# deepagents) wants "ollama:<model>"; ChatOllama takes the raw name.
+# Each of these agents (orchestrator, content_agent subagent, research_agent,
+# weather_agent) has its own independently configurable model - no shared
+# default, so tuning one doesn't affect the others. Note two libraries expect
+# different provider-prefix conventions for the same model name: litellm
+# (used directly, and via ADK's LiteLlm) wants "ollama_chat/<model>", while
+# langchain's init_chat_model (used by deepagents) wants "ollama:<model>";
+# ChatOllama takes the raw name.
 ORCHESTRATOR_MODEL = os.getenv("ORCHESTRATOR_MODEL", "gpt-oss:20b")
 LITELLM_ORCHESTRATOR_MODEL = f"ollama_chat/{ORCHESTRATOR_MODEL}"
 
@@ -32,7 +32,11 @@ LITELLM_CONTENT_AGENT_MODEL = f"ollama_chat/{CONTENT_AGENT_MODEL}"
 RESEARCH_AGENT_MODEL = os.getenv("RESEARCH_AGENT_MODEL", "gpt-oss:20b")
 LANGCHAIN_RESEARCH_AGENT_MODEL = f"ollama:{RESEARCH_AGENT_MODEL}"
 
-WEATHER_AGENT_MODEL = os.getenv("WEATHER_AGENT_MODEL", "gpt-oss:20b")
+# weather_agent runs against NVIDIA's hosted API (ChatNVIDIA) rather than
+# local Ollama - see docs/BUG_WEATHER_TOOL_SELECTION.md for why local models
+# struggled with this agent's tool-heavy prompts.
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+WEATHER_AGENT_MODEL = os.getenv("WEATHER_AGENT_MODEL", "z-ai/glm-5.2")
 
 # LLM-semantic observability for the LangChain-based agents (content_agent's
 # graph, research_agent's deepagents graph, and litellm's raw completion

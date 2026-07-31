@@ -29,6 +29,7 @@ dependencies = [
   "ddgs>=9.14.4",
   "langfuse>=4",
   "langchain-mcp-adapters>=0.3.0",
+  "langchain-nvidia-ai-endpoints>=1.4.3",
 ]
 
 [project.scripts]
