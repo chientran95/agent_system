@@ -2,7 +2,7 @@
 
 A coverage matrix for exercising every capability in the system, grouped by what's actually being tested rather than by file. See [TESTING.md](TESTING.md) for concrete curl/`message/send`/`message/stream` examples of the underlying mechanics.
 
-## 1. Single-agent core behavior (direct A2A, bypass orchestrator)
+## 1. (DONE) Single-agent core behavior (direct A2A, bypass orchestrator)
 
 | # | Scenario | Target | Input | Expect |
 |---|---|---|---|---|
