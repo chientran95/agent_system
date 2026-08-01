@@ -1,11 +1,16 @@
 import uuid
+from typing import Any
 
 from ddgs import DDGS
 from deepagents import create_deep_agent
+from langchain.agents.middleware.types import AgentMiddleware
+from langchain.chat_models import init_chat_model
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command, interrupt
+from pydantic import BaseModel, Field
 
 from .a2a_peer_client import PeerInputRequired, call_peer_agent_by_name
 from .content_agent import ContentAgent
@@ -78,15 +83,106 @@ async def call_code_agent(request: str, config: RunnableConfig) -> str:
     raise RuntimeError("code_agent needed too many rounds of clarification.")
 
 
+def _content_to_text(content: Any) -> str:
+    """Normalizes a LangChain message's `.content` into plain text. Some
+    tool results come back as a list of content blocks (e.g. `[{"type":
+    "text", "text": "..."}]`) rather than a plain string - yielding that
+    list as-is (or its Python repr) breaks any caller expecting a string.
+    Same fix as weather_agent.py's, applied here defensively."""
+    if not content:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and "text" in block:
+                parts.append(block["text"])
+            elif isinstance(block, str):
+                parts.append(block)
+            else:
+                parts.append(str(block))
+        return "\n".join(parts)
+    return str(content)
+
+
+RESEARCH_CLARIFY_SYSTEM_PROMPT = (
+    "You are checking whether a research request has enough information to "
+    "act on before any research begins. If the topic is genuinely too "
+    "vague or ambiguous to research meaningfully (e.g. no real subject "
+    "given, or a term ambiguous enough to materially change what you'd "
+    "research), set clarifying_question - do not guess. For everything "
+    "else - scope, angle, length, level of detail - leave "
+    "clarifying_question null and let the research proceed with sensible "
+    "defaults."
+)
+
+
+class ClarificationCheck(BaseModel):
+    """Structured output for the pre-research clarification check."""
+
+    clarifying_question: str | None = Field(
+        default=None,
+        description=(
+            "A question to ask the user, ONLY if the research topic is "
+            "genuinely too vague or ambiguous to research meaningfully. "
+            "Leave this null for everything else - never ask about scope, "
+            "angle, length, or other things you can reasonably infer or "
+            "default."
+        ),
+    )
+
+
+class ClarifyTopicMiddleware(AgentMiddleware):
+    """Runs once, before any research/model work begins, checking whether
+    the request is answerable at all. A required-or-null structured-output
+    field is a more reliable signal than asking the model to separately
+    decide whether to invoke an ask_user tool - "decide whether to invoke a
+    side-channel tool" is exactly the behavior that's been unreliable
+    throughout this project (e.g. call_code_agent getting skipped even when
+    relevant). Same design as weather_agent's select_tools_node, adapted to
+    deepagents' middleware hooks since, unlike weather_agent, this agent's
+    graph is built internally by create_deep_agent() rather than by hand.
+    See docs/BUG_WEATHER_TOOL_SELECTION.md for the original design writeup."""
+
+    def __init__(self, model: Any) -> None:
+        super().__init__()
+        self._checker = model.with_structured_output(ClarificationCheck)
+
+    async def abefore_agent(self, state: dict[str, Any], runtime: Any) -> dict[str, Any] | None:
+        messages = state["messages"]
+        asked_messages: list[Any] = []
+        for _ in range(_MAX_CLARIFICATION_ROUNDS):
+            try:
+                result = await self._checker.ainvoke(
+                    [SystemMessage(content=RESEARCH_CLARIFY_SYSTEM_PROMPT), *messages]
+                )
+            except Exception:
+                result = None
+            if result and result.clarifying_question:
+                answer = interrupt(result.clarifying_question)
+                question_msg = AIMessage(content=result.clarifying_question)
+                answer_msg = HumanMessage(content=answer)
+                messages = [*messages, question_msg, answer_msg]
+                asked_messages.extend([question_msg, answer_msg])
+                continue
+            break
+        if asked_messages:
+            return {"messages": asked_messages}
+        return None
+
+
 class ResearchAgent:
     def __init__(self) -> None:
         self.content_agent = ContentAgent()
         self.checkpointer = InMemorySaver()
+        checker_model = init_chat_model(LANGCHAIN_RESEARCH_AGENT_MODEL)
         self.client = create_deep_agent(
             model=LANGCHAIN_RESEARCH_AGENT_MODEL,
             tools=[web_search, call_code_agent, ask_user],
             subagents=[self.content_agent.as_subagent()],
             system_prompt=RESEARCH_SYSTEM_PROMPT,
+            middleware=[ClarifyTopicMiddleware(checker_model)],
             checkpointer=self.checkpointer,
         )
         print(f"ResearchAgent initialized with LLM={LANGCHAIN_RESEARCH_AGENT_MODEL}")
@@ -132,7 +228,7 @@ class ResearchAgent:
                     continue
                 messages = node_output.get("messages", []) if isinstance(node_output, dict) else []
                 for message in messages:
-                    text = getattr(message, "content", "") or ""
+                    text = _content_to_text(getattr(message, "content", None))
                     tool_calls = getattr(message, "tool_calls", None) or []
                     if not text and tool_calls:
                         # A tool-calling turn normally has empty content (the

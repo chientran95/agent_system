@@ -1,7 +1,7 @@
 from contextlib import AsyncExitStack
 from typing import Annotated, Any, TypedDict
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_mcp_adapters.tools import load_mcp_tools
@@ -60,6 +60,10 @@ _MCP_SERVER_CONFIG = {
 # to the first-pass selector to remember.
 _ALWAYS_INCLUDED_TOOL_NAMES = {"geocoding"}
 _MAX_SELECTED_TOOLS = 3
+# Bounds the "ask a clarifying question, fold the answer back in, try again"
+# loop in select_tools_node - a safety cap against looping forever if the
+# model keeps asking, not an expected number of rounds in practice.
+_MAX_CLARIFICATION_ROUNDS = 2
 
 TOOL_SELECTOR_SYSTEM_PROMPT = (
     "You are choosing which weather-data tools a downstream agent will need "
@@ -68,18 +72,40 @@ TOOL_SELECTOR_SYSTEM_PROMPT = (
     "available separately, so don't worry about picking it here - focus "
     "only on which weather-data tool(s) are actually needed.\n\n"
     f"Pick at most {_MAX_SELECTED_TOOLS} tools - usually just one is enough. "
-    "Choose exact names only from the list below."
+    "Choose exact names only from the list below.\n\n"
+    "If the request is genuinely missing information you need - no "
+    "location given at all, or a place name ambiguous enough to materially "
+    "change the answer - set clarifying_question instead of picking tools; "
+    "do not guess. For everything else - units, format, forecast length, "
+    "which model to use - just proceed; never ask about things you can "
+    "reasonably infer or default."
 )
 
 
 class ToolSelection(BaseModel):
-    """Structured output for the cheap first-pass tool-selection call."""
+    """Structured output for the cheap first-pass tool-selection call. This
+    doubles as the input-required check: a clarifying_question here is a
+    required-or-null *field* on a call the model already has to make, not a
+    separate tool it has to decide to invoke - see the design discussion in
+    docs/BUG_WEATHER_TOOL_SELECTION.md for why that distinction matters."""
 
+    clarifying_question: str | None = Field(
+        default=None,
+        description=(
+            "A question to ask the user, ONLY if the request is genuinely "
+            "missing information needed to pick a tool (e.g. no location "
+            "given at all, or a materially ambiguous place name). Leave "
+            "this null for everything else - never ask about things you "
+            "can reasonably infer or default."
+        ),
+    )
     tool_names: list[str] = Field(
+        default_factory=list,
         description=(
             f"Names of up to {_MAX_SELECTED_TOOLS} tools, chosen only from the "
-            "provided list, most relevant to the user's request."
-        )
+            "provided list, most relevant to the user's request. Leave empty "
+            "if clarifying_question is set instead."
+        ),
     )
 
 
@@ -89,6 +115,29 @@ class WeatherState(TypedDict):
     # state after every step, and StructuredTool instances aren't
     # msgpack-serializable.
     selected_tool_names: list[str]
+
+
+def _content_to_text(content: Any) -> str:
+    """Normalizes a LangChain message's `.content` into plain text. MCP tool
+    results come back as a list of content blocks (e.g. `[{"type": "text",
+    "text": "..."}]`), not a plain string - yielding that list as-is (or
+    naively falling back to its Python repr) breaks any caller that expects
+    a string, so extract each block's actual text instead."""
+    if not content:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and "text" in block:
+                parts.append(block["text"])
+            elif isinstance(block, str):
+                parts.append(block)
+            else:
+                parts.append(str(block))
+        return "\n".join(parts)
+    return str(content)
 
 
 @tool
@@ -136,31 +185,61 @@ class WeatherAgent:
         selectable_by_name = {t.name: t for t in selectable}
         selector_model = self.model.with_structured_output(ToolSelection)
 
+        fallback_names = ["weather_forecast"] if "weather_forecast" in selectable_by_name else []
+
         async def select_tools_node(state: WeatherState) -> dict[str, Any]:
             """Cheap first pass: shows only tool name+description (not full
             parameter schemas) so even a small-context model can see every
             candidate at once, then narrows to a handful of tools whose full
             (much larger) schemas get bound for the actual agent turn below.
-            See docs/BUG_WEATHER_TOOL_SELECTION.md for why this exists."""
+
+            Also doubles as the input-required check: the same structured
+            call can set clarifying_question instead of picking tools. If it
+            does, interrupt() here and fold the answer back into the
+            conversation before retrying selection - bounded by
+            _MAX_CLARIFICATION_ROUNDS as a safety cap, not an expected
+            number of rounds. See docs/BUG_WEATHER_TOOL_SELECTION.md for why
+            this exists."""
             tool_list_text = "\n".join(f"- {t.name}: {t.description}" for t in selectable)
-            try:
-                selection = await selector_model.ainvoke(
-                    [
-                        SystemMessage(content=f"{TOOL_SELECTOR_SYSTEM_PROMPT}\n\n{tool_list_text}"),
-                        *state["messages"],
+            messages = state["messages"]
+            asked_messages: list[BaseMessage] = []
+
+            for _ in range(_MAX_CLARIFICATION_ROUNDS):
+                try:
+                    selection = await selector_model.ainvoke(
+                        [
+                            SystemMessage(content=f"{TOOL_SELECTOR_SYSTEM_PROMPT}\n\n{tool_list_text}"),
+                            *messages,
+                        ]
+                    )
+                except Exception:
+                    selection = None
+
+                if selection and selection.clarifying_question:
+                    answer = interrupt(selection.clarifying_question)
+                    question_msg = AIMessage(content=selection.clarifying_question)
+                    answer_msg = HumanMessage(content=answer)
+                    messages = [*messages, question_msg, answer_msg]
+                    asked_messages.extend([question_msg, answer_msg])
+                    continue
+
+                selected_names = (
+                    [name for name in dict.fromkeys(selection.tool_names) if name in selectable_by_name][
+                        :_MAX_SELECTED_TOOLS
                     ]
+                    if selection
+                    else []
                 )
-                selected_names = [
-                    name for name in dict.fromkeys(selection.tool_names) if name in selectable_by_name
-                ][:_MAX_SELECTED_TOOLS]
-            except Exception:
-                selected_names = []
-            if not selected_names:
-                # Selector produced nothing usable - fall back to the
-                # general-purpose tool rather than leaving the agent with no
-                # weather-data tool at all.
-                selected_names = ["weather_forecast"] if "weather_forecast" in selectable_by_name else []
-            return {"selected_tool_names": selected_names}
+                if not selected_names:
+                    # Selector produced nothing usable - fall back to the
+                    # general-purpose tool rather than leaving the agent
+                    # with no weather-data tool at all.
+                    selected_names = fallback_names
+                return {"selected_tool_names": selected_names, "messages": asked_messages}
+
+            # Exhausted clarification rounds without a usable selection -
+            # fall back rather than looping forever on an undecided model.
+            return {"selected_tool_names": fallback_names, "messages": asked_messages}
 
         async def agent_node(state: WeatherState) -> dict[str, Any]:
             selected = [
@@ -217,7 +296,7 @@ class WeatherAgent:
                     continue
                 messages = node_output.get("messages", []) if isinstance(node_output, dict) else []
                 for message in messages:
-                    text = getattr(message, "content", "") or ""
+                    text = _content_to_text(getattr(message, "content", None))
                     tool_calls = getattr(message, "tool_calls", None) or []
                     if not text and tool_calls:
                         # A tool-calling turn normally has empty content (the
