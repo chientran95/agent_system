@@ -3,7 +3,7 @@ from typing import Any
 
 import httpx
 
-from .agent_registry import lookup_agent_url
+from .agent_registry import resolve_agent_url
 
 MAX_MESH_CALL_DEPTH = 10
 MESH_DEPTH_METADATA_KEY = "mesh_call_depth"
@@ -77,7 +77,7 @@ async def call_peer_agent_by_name(name: str, fallback_url: str, text: str, call_
     agent isn't listed in the registry. Both discovery strategies are wired
     up side by side this way - editing agent_registry.json changes routing
     with no code changes, but nothing breaks if an agent isn't registered."""
-    url = lookup_agent_url(name) or fallback_url
+    url = resolve_agent_url(name, fallback_url)
     return await call_peer_agent(url, text, call_depth)
 
 

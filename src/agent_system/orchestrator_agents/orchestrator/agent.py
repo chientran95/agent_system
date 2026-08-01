@@ -2,7 +2,7 @@ from google.adk.agents import Agent
 from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
 from google.adk.models.lite_llm import LiteLlm
 
-from agent_system.agent_registry import lookup_agent_url
+from agent_system.agent_registry import resolve_agent_url
 from agent_system.settings import (
     CODE_AGENT_URL,
     LITELLM_ORCHESTRATOR_MODEL,
@@ -16,7 +16,7 @@ def _agent_card_url(name: str, fallback_url: str) -> str:
     AgentCard name), falling back to Direct Configuration (settings.py) if
     the agent isn't listed in the registry - the same discovery precedence
     used by the mesh's call_peer_agent_by_name."""
-    url = lookup_agent_url(name) or fallback_url
+    url = resolve_agent_url(name, fallback_url)
     return f"{url}/.well-known/agent-card.json"
 
 
