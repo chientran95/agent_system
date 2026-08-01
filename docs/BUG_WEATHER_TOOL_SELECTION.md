@@ -84,6 +84,8 @@ Verified via `response_metadata.prompt_eval_count` no longer being clamped to a 
 
 **Problem 2 (`mistral-small3.2:24b` tool-calling failure) — worked around, root cause not identified.** Switching `WEATHER_AGENT_MODEL` to `qwen2.5:7b` resolved it in practice. The underlying "why does `mistral-small3.2:24b` return an empty response to this exact prompt via Ollama" question was not answered - it was decisively isolated to the model/Ollama combination (step 11 above) but not root-caused further, since a working alternative was available and the isolation work already consumed significant effort.
 
+**Update: `weather_agent` has since moved off Ollama entirely.** `ChatOllama` was replaced with `ChatNVIDIA` (NVIDIA's hosted API), currently running `stepfun-ai/step-3.7-flash`. This was a separate, later decision (not because `qwen2.5:7b` stopped working) - see the model-selection discussion in this project's history for the reasoning. The two-pass tool-selection redesign below is unaffected by the provider change and remains the reason tool-calling works reliably regardless of which backend model is used.
+
 **Two-pass tool selection — implemented** (this is what makes `qwen2.5:7b` viable, and is worth keeping regardless of which model is used, since it also cuts per-turn latency/token cost significantly). `weather_agent.py`'s `_ensure_graph()` now has three nodes instead of two:
 
 1. **`select_tools`** (new, runs first): shows the model only `name: description` for all 17 tools (no parameter schemas - roughly 4-5KB total vs. 157KB for full schemas) and asks it to pick up to 3 via `with_structured_output(ToolSelection)`. Falls back to `["weather_forecast"]` if the selector errors or returns nothing usable.

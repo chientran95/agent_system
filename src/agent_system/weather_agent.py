@@ -1,8 +1,10 @@
+from contextlib import AsyncExitStack
 from typing import Annotated, Any, TypedDict
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_mcp_adapters.tools import load_mcp_tools
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph
@@ -111,6 +113,7 @@ class WeatherAgent:
         )
         self.checkpointer = InMemorySaver()
         self._graph = None
+        self._exit_stack = AsyncExitStack()
         print(f"WeatherAgent initialized with LLM=nvidia:{WEATHER_AGENT_MODEL}")
 
     async def _ensure_graph(self):
@@ -119,7 +122,15 @@ class WeatherAgent:
         if self._graph is not None:
             return self._graph
 
-        mcp_tools = await self.mcp_client.get_tools()
+        # Open ONE persistent MCP session for the agent's whole lifetime,
+        # instead of get_tools()'s default behavior of spinning up a fresh
+        # session (and, for stdio, a fresh open-meteo-mcp-server subprocess)
+        # for every single tool call. That per-call respawn caused
+        # intermittent tool failures with a blank error message - a cold-start
+        # race between the freshly-spawned process and its first real API
+        # call to Open-Meteo. See docs/BUG_WEATHER_TOOL_SELECTION.md.
+        session = await self._exit_stack.enter_async_context(self.mcp_client.session("open_meteo"))
+        mcp_tools = await load_mcp_tools(session)
         always_included = [t for t in mcp_tools if t.name in _ALWAYS_INCLUDED_TOOL_NAMES]
         selectable = [t for t in mcp_tools if t.name not in _ALWAYS_INCLUDED_TOOL_NAMES]
         selectable_by_name = {t.name: t for t in selectable}
@@ -174,6 +185,10 @@ class WeatherAgent:
         graph.add_edge("tools", "agent")
         self._graph = graph.compile(checkpointer=self.checkpointer)
         return self._graph
+
+    async def aclose(self) -> None:
+        """Closes the persistent MCP session opened by _ensure_graph."""
+        await self._exit_stack.aclose()
 
     async def astream_query(self, query: str, thread_id: str):
         """Starts a new run, streaming (node_name, text) progress chunks as
