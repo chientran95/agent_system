@@ -8,6 +8,7 @@ from a2a.types import AgentCapabilities, AgentCard, AgentSkill, Part, TaskState,
 from a2a.utils import new_task
 from fastapi import FastAPI
 
+from .a2a_peer_client import get_incoming_call_depth
 from .a2a_queue_workaround import ResilientQueueManager
 from .a2a_tracing import init_tracing, instrument_app
 from .a2a_utils import get_original_user_text
@@ -23,6 +24,7 @@ class WeatherAgentExecutor(AgentExecutor):
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         text = get_original_user_text(context)
+        call_depth = get_incoming_call_depth(context.message.metadata if context.message else None)
         task = context.current_task
         is_resuming = bool(task) and task.status.state == TaskState.input_required
 
@@ -32,6 +34,12 @@ class WeatherAgentExecutor(AgentExecutor):
 
         updater = TaskUpdater(event_queue, task.id, task.context_id)
         await updater.start_work()
+
+        source = f"mesh call at depth {call_depth}" if call_depth else "top-level call"
+        print(
+            f"[weather_agent] {'resuming' if is_resuming else 'new'} task={task.id} "
+            f"({source}): {text[:100]!r}"
+        )
 
         # The A2A task ID doubles as the LangGraph thread ID, so resuming a
         # paused task continues the same checkpointed graph state.
@@ -56,6 +64,8 @@ class WeatherAgentExecutor(AgentExecutor):
                 TaskState.working,
                 message=updater.new_agent_message([Part(root=TextPart(text=f"[{kind}] {preview}"))]),
             )
+
+        print(f"[weather_agent] task={task.id} finished as {result_kind}")
 
         if result_kind == "input_required":
             await updater.requires_input(

@@ -34,6 +34,12 @@ class ResearchAgentExecutor(AgentExecutor):
         updater = TaskUpdater(event_queue, task.id, task.context_id)
         await updater.start_work()
 
+        source = f"mesh call at depth {call_depth}" if call_depth else "top-level call"
+        print(
+            f"[research_agent] {'resuming' if is_resuming else 'new'} task={task.id} "
+            f"({source}): {text[:100]!r}"
+        )
+
         # The A2A task ID doubles as the LangGraph thread ID, so resuming a
         # paused task continues the same checkpointed graph state.
         if is_resuming:
@@ -57,6 +63,8 @@ class ResearchAgentExecutor(AgentExecutor):
                 TaskState.working,
                 message=updater.new_agent_message([Part(root=TextPart(text=f"[{kind}] {preview}"))]),
             )
+
+        print(f"[research_agent] task={task.id} finished as {result_kind}")
 
         if result_kind == "input_required":
             await updater.requires_input(

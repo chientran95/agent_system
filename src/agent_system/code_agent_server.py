@@ -37,6 +37,12 @@ class CodeAgentExecutor(AgentExecutor):
         updater = TaskUpdater(event_queue, task.id, task.context_id)
         await updater.start_work()
 
+        source = f"mesh call at depth {call_depth}" if call_depth else "top-level call"
+        print(
+            f"[code_agent] {'resuming' if is_resuming else 'new'} task={task.id} "
+            f"({source}): {text[:100]!r}"
+        )
+
         resume_session_id = self._sessions.get(task.id) if is_resuming else None
 
         result_text = ""
@@ -62,6 +68,8 @@ class CodeAgentExecutor(AgentExecutor):
 
         if session_id:
             self._sessions[task.id] = session_id
+
+        print(f"[code_agent] task={task.id} finished as {result_kind}")
 
         if result_kind == "input_required":
             await updater.requires_input(
