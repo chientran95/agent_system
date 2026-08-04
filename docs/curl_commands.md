@@ -1,8 +1,195 @@
 # Test Scenario curl / test commands
 
-Commands for exercising [TEST_SCENARIOS.md](TEST_SCENARIOS.md), scenarios 2 through 6. Not every row has a real curl form — where a scenario has no HTTP trigger path (mesh depth limit, registry lookups, malformed-peer-response handling, storage/DB checks), the matching Python or shell snippet is given instead and called out explicitly, same as the rest of this file.
+Commands for exercising [TEST_SCENARIOS.md](TEST_SCENARIOS.md), scenarios 1 through 6. Not every row has a real curl form — where a scenario has no HTTP trigger path (mesh depth limit, registry lookups, malformed-peer-response handling, storage/DB checks), the matching Python or shell snippet is given instead and called out explicitly, same as the rest of this file.
 
 Make sure `code_agent` (port 8001), `research_agent` (port 8002), `weather_agent` (port 8003), and `orchestrator` (port 8000) are running before you start. Scenario 5 additionally needs Jaeger up (`make jaeger`, UI/API at port 16686) and, optionally, Langfuse keys set in `.env` for the Langfuse-only checks.
+
+Every request below uses streaming (`message/stream` for the three A2A agents, `/run_sse` for the ADK orchestrator) rather than a blocking call — all agent servers declare `AgentCapabilities(streaming=True)` (`code_agent`, `research_agent`, `weather_agent`, and the LangGraph orchestrator alternative), and ADK's own `/run_sse` is its streaming route. `-N` disables curl's output buffering so events print as they arrive.
+
+### Reading streaming responses
+
+A streaming response is a sequence of `data: {...}` SSE lines (plus blank lines and `: ping ...` comments to keep the connection alive) rather than one JSON object. To pull a specific field out programmatically — e.g. when a curl command redirects to a file for a later step — strip the `data: ` prefix and slurp all lines into `jq`:
+
+```bash
+sed -n 's/^data: //p' response.json | jq -s '...'
+```
+
+Two patterns come up repeatedly for the three A2A agents (`code_agent`/`research_agent`/`weather_agent`):
+
+```bash
+# task ID - from the first event, which is always a raw Task snapshot (kind:"task")
+sed -n 's/^data: //p' response.json | jq -s '[.[] | select(.result.kind == "task")] | first | .result.id'
+
+# final status text - from the last status-update event that reached a terminal state
+sed -n 's/^data: //p' response.json | jq -s '
+  [.[] | select(.result.kind == "status-update" and (.result.status.state == "completed" or .result.status.state == "input-required"))]
+  | last | {state: .result.status.state, text: .result.status.message.parts[0].text}'
+```
+
+The second one only applies to agents that attach a `message` to their final status update (`weather_agent` always does; `code_agent`'s normal completion doesn't - it puts the answer in a `generated_code` artifact-update event instead, called out inline below where that matters).
+
+---
+
+## Scenario 1 — Single-agent core behavior (direct A2A, bypass orchestrator)
+
+All curl-reachable — this is the most direct layer, one JSON-RPC call straight to the agent being tested.
+
+### 1.1 — Clean code generation
+
+```bash
+curl -N -s -X POST http://localhost:8001/ -H "Content-Type: application/json" -d '{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "method": "message/stream",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [{"kind": "text", "text": "Write a Python function that reverses a string."}],
+      "messageId": "msg-1-1"
+    }
+  }
+}' --max-time 90
+```
+
+You'll see `status-update` events stream in as Claude generates the response (token-level chunks), then a final `artifact-update` event named `generated_code`, then a `completed` status-update with no message attached (the answer lives in the artifact, not `status.message`). **If this errors** with a billing/credit message, that's your `CLAUDE_API_KEY`'s Anthropic account, not the wiring — check [console.anthropic.com/settings/billing](https://console.anthropic.com/settings/billing).
+
+### 1.2 — Ambiguous code request → clarify → resume
+
+```bash
+# 1. ambiguous request - code_agent should ask rather than guess
+curl -N -s -X POST http://localhost:8001/ -H "Content-Type: application/json" -d '{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "method": "message/stream",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [{"kind": "text", "text": "Write a validation function."}],
+      "messageId": "msg-1-2a"
+    }
+  }
+}' --max-time 90 > /tmp/scenario_1_2.json
+```
+
+The final `status-update` event's `status.state` should be `"input-required"` with a real clarifying question (e.g. asking what should be validated) in `status.message`. Pull the task ID out to resume:
+
+```bash
+sed -n 's/^data: //p' /tmp/scenario_1_2.json | jq -s '[.[] | select(.result.kind == "task")] | first | .result.id'
+```
+
+```bash
+# 2. resume - replace <TASK_ID> with the id from step 1
+curl -N -s -X POST http://localhost:8001/ -H "Content-Type: application/json" -d '{
+  "jsonrpc": "2.0",
+  "id": "2",
+  "method": "message/stream",
+  "params": {
+    "message": {
+      "role": "user",
+      "taskId": "<TASK_ID>",
+      "parts": [{"kind": "text", "text": "Validate that a string is a well-formed email address."}],
+      "messageId": "msg-1-2b"
+    }
+  }
+}' --max-time 90
+```
+
+Expect the same shape as 1.1's completion (final answer in a `generated_code` artifact-update, not `status.message`) — same session resumed. Internally `code_agent_server.py` maps the task ID to a Claude Agent SDK session ID to continue the same session — you only ever need to pass the `taskId` back, same shape as every other agent's resume.
+
+### 1.3 — Research happy path
+
+```bash
+curl -N -s -X POST http://localhost:8002/ -H "Content-Type: application/json" -d '{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "method": "message/stream",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [{"kind": "text", "text": "Research the current state of protected bike lane funding in US cities and write a blog post about it."}],
+      "messageId": "msg-1-3"
+    }
+  }
+}' --max-time 240
+```
+
+`--max-time 240` — real DuckDuckGo search plus two model calls (research_agent's own reasoning, then the `content_writer` subagent drafting + verifying). Expect `completed` with a non-empty `blog_post` artifact; check `storage/draft-*.md` for the saved file.
+
+**Reliability note:** with a smaller local model this doesn't always follow the intended research → delegate → return sequence — on an off run it may answer directly instead of calling `content_writer`. Retry if the result looks like a bullet-point summary instead of a formatted post.
+
+### 1.4 — Well-specified weather query
+
+```bash
+curl -N -s -X POST http://localhost:8003/ -H "Content-Type: application/json" -d '{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "method": "message/stream",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [{"kind": "text", "text": "What is the current weather in Tokyo, Japan?"}],
+      "messageId": "msg-1-4"
+    }
+  }
+}' --max-time 90
+```
+
+Each `agent` node turn and `tools` node turn (the geocoding/forecast tool results) streams as its own `working` status-update event before the final `completed` one with the answer in `status.message`. Watch which tool it picks (`weather_forecast` vs a national-model tool like `jma_forecast`), and whether it calls `geocoding` first to resolve the place name into coordinates — both are real, observed points of variability with local models, not guaranteed to go the same way every run.
+
+### 1.5 — Underspecified weather query → clarify → resume
+
+```bash
+# 1. underspecified - weather_agent should ask for a location
+curl -N -s -X POST http://localhost:8003/ -H "Content-Type: application/json" -d '{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "method": "message/stream",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [{"kind": "text", "text": "What is the weather like today?"}],
+      "messageId": "msg-1-5a"
+    }
+  }
+}' --max-time 60 > /tmp/scenario_1_5.json
+```
+
+Check the final status text and pull the task ID using the two patterns from the top of this doc:
+
+```bash
+sed -n 's/^data: //p' /tmp/scenario_1_5.json | jq -s '
+  [.[] | select(.result.kind == "status-update" and (.result.status.state == "completed" or .result.status.state == "input-required"))]
+  | last | {state: .result.status.state, text: .result.status.message.parts[0].text}'
+
+sed -n 's/^data: //p' /tmp/scenario_1_5.json | jq -s '[.[] | select(.result.kind == "task")] | first | .result.id'
+```
+
+`state` should be `"input-required"` with a real clarifying question as `text`. Then resume against that task ID:
+
+```bash
+# 2. resume - replace <TASK_ID> with the id from step 1
+curl -N -s -X POST http://localhost:8003/ -H "Content-Type: application/json" -d '{
+  "jsonrpc": "2.0",
+  "id": "2",
+  "method": "message/stream",
+  "params": {
+    "message": {
+      "role": "user",
+      "taskId": "<TASK_ID>",
+      "parts": [{"kind": "text", "text": "Berlin, Germany"}],
+      "messageId": "msg-1-5b"
+    }
+  }
+}' --max-time 90
+```
+
+Confirm `status.state` moves to `"completed"` with the same `taskId`/thread resumed (the task ID doubles as the LangGraph thread ID).
+
+**Reliability note:** the pause/resume mechanism itself is solid across different local models. What's inconsistent is whether the model *acts correctly* on the resumed answer (e.g. it may re-ask for information you just gave it) — a model-capability limitation, not a mechanism bug.
+
+### 1.6 — Streaming variant of 1.1 / 1.4
+
+Since every command in this doc now uses `message/stream`, 1.1 and 1.4 above already **are** this scenario — there's no separate blocking form left to compare against. Re-run them and confirm multiple `working` progress events (not just one) before the final `completed` event — for `weather_agent` (1.4) specifically, confirm you see both a `[agent]`-labeled chunk (the model's tool-call decision) and a `[tools]`-labeled chunk (the geocoding/forecast tool result) as separate events, not just the final answer.
 
 ---
 
@@ -12,7 +199,7 @@ Only 2.1, 2.2, 2.6, and 2.7 are reachable via curl — 2.3, 2.4, and 2.5 have no
 
 ---
 
-## 2.1 — code_agent → research_agent delegation
+### 2.1 — code_agent → research_agent delegation
 
 ```bash
 curl -N -s -X POST http://localhost:8001/ -H "Content-Type: application/json" -d '{
@@ -33,7 +220,7 @@ Watch for a `[call_research_agent]`-style progress event before the final code a
 
 ---
 
-## 2.2 — research_agent → code_agent delegation
+### 2.2 — research_agent → code_agent delegation
 
 ```bash
 curl -N -s -X POST http://localhost:8002/ -H "Content-Type: application/json" -d '{
@@ -54,7 +241,7 @@ Per the known model-unreliability note in [TEST_SCENARIOS.md](TEST_SCENARIOS.md)
 
 ---
 
-## 2.3 — Bubbling (code_agent asks a question mid research_agent delegation)
+### 2.3 — Bubbling (code_agent asks a question mid research_agent delegation)
 
 Not reliably reachable via curl (depends on the deep agent's own tool-choice judgment on top of code_agent's own clarify judgment). Direct tool-level test instead — isolates `call_code_agent` + `PeerInputRequired` + `interrupt()` from LLM tool-choice:
 
@@ -92,7 +279,7 @@ asyncio.run(main())
 
 ---
 
-## 2.4 — Depth limit enforcement
+### 2.4 — Depth limit enforcement
 
 Not reachable via curl — no real cycle exists to trigger it naturally:
 
@@ -112,7 +299,7 @@ asyncio.run(main())
 
 ---
 
-## 2.5 — Registry resolves before Direct Config
+### 2.5 — Registry resolves before Direct Config
 
 Pure Python assertion, no server needed:
 
@@ -125,7 +312,7 @@ print("PASS")
 
 ---
 
-## 2.6 — Fallback when agent isn't registered
+### 2.6 — Fallback when agent isn't registered
 
 ```bash
 # 1. back up and remove the research_agent entry
@@ -170,7 +357,7 @@ That's the actual proof, not just the curl succeeding.
 
 ---
 
-## 2.7 — Registry override actually changes routing
+### 2.7 — Registry override actually changes routing
 
 ```bash
 # 1. back up and point coding_agent at a wrong port
@@ -287,7 +474,6 @@ Look for `transfer_to_agent` routing to `weather_agent`.
 > curl -N -s -X POST "http://localhost:8000/run_sse" ... | sed -n 's/^data: //p' | \
 >   jq -r '"--- \(.author) ---\n\(.content.parts[]?.text // .content.parts[]?.functionCall // empty)"'
 > ```
-> For `/run` (blocking) instead of `/run_sse`, the response is one JSON array: `curl -s ... | jq -r '.[] | "--- \(.author) ---\n\(.content.parts[]?.text // .content.parts[]?.functionCall // empty)"'`.
 
 ### 3.2 — Weather sub-agent pauses via orchestrator
 
@@ -342,7 +528,7 @@ Cheap smoke test — one trivial routing request, assert the response has a non-
 curl -s -X POST "http://localhost:8000/apps/orchestrator/users/tester/sessions/s5" \
   -H "Content-Type: application/json" -d '{}'
 
-curl -s -X POST "http://localhost:8000/run" -H "Content-Type: application/json" -d '{
+curl -N -s -X POST "http://localhost:8000/run_sse" -H "Content-Type: application/json" -d '{
   "appName": "orchestrator",
   "userId": "tester",
   "sessionId": "s5",
@@ -350,10 +536,26 @@ curl -s -X POST "http://localhost:8000/run" -H "Content-Type: application/json" 
     "role": "user",
     "parts": [{"text": "Write a Python function that adds two numbers."}]
   }
-}' --max-time 60 | jq '[.[] | .content.parts[]? | select(.functionCall)] | length > 0'
+}' --max-time 60 | sed -n 's/^data: //p' | jq -s '[.[] | .content.parts[]? | select(.functionCall)] | length > 0'
 ```
 
 `true` means at least one event had a real `functionCall`; `false` means the model returned empty `parts` on every event (retry).
+
+### Cleanup — delete a session
+
+Same URL shape as creating a session, just `DELETE`, no body needed:
+
+```bash
+curl -s -X DELETE "http://localhost:8000/apps/orchestrator/users/tester/sessions/s1"
+```
+
+Goes straight to `session_service.delete_session()`. Useful for freeing a `sessionId` mid-run (e.g. between retries of 3.2/3.3) without restarting the orchestrator. Confirm it's gone:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" "http://localhost:8000/apps/orchestrator/users/tester/sessions/s1"
+```
+
+`404` means deleted; `200` means it's still there. Note: with the default `InMemorySessionService`, restarting the orchestrator process clears all sessions anyway — this is mainly for cleanup within a single run.
 
 ---
 
@@ -367,10 +569,10 @@ This exercises `ResilientQueueManager` ([BUG_A2A_QUEUE_LIFECYCLE.md](BUG_A2A_QUE
 
 ```bash
 # 1. pause: underspecified weather query
-curl -s -X POST http://localhost:8003/ -H "Content-Type: application/json" -d '{
+curl -N -s -X POST http://localhost:8003/ -H "Content-Type: application/json" -d '{
   "jsonrpc": "2.0",
   "id": "1",
-  "method": "message/send",
+  "method": "message/stream",
   "params": {
     "message": {
       "role": "user",
@@ -378,17 +580,21 @@ curl -s -X POST http://localhost:8003/ -H "Content-Type: application/json" -d '{
       "messageId": "msg-4-1a"
     }
   }
-}' --max-time 90
+}' --max-time 90 > /tmp/scenario_4_1.json
 ```
 
-Note the `taskId` from the response (`status.state` should be `"input-required"`), wait a few seconds, then resume against the **same** `taskId`:
+Pull the task ID (should be `input-required`, per the status-text check from the top of this doc), wait a few seconds, then resume against the **same** `taskId`:
+
+```bash
+sed -n 's/^data: //p' /tmp/scenario_4_1.json | jq -s '[.[] | select(.result.kind == "task")] | first | .result.id'
+```
 
 ```bash
 # 2. resume - replace <TASK_ID> with the id from step 1
-curl -s -X POST http://localhost:8003/ -H "Content-Type: application/json" -d '{
+curl -N -s -X POST http://localhost:8003/ -H "Content-Type: application/json" -d '{
   "jsonrpc": "2.0",
   "id": "1",
-  "method": "message/send",
+  "method": "message/stream",
   "params": {
     "message": {
       "role": "user",
@@ -400,29 +606,37 @@ curl -s -X POST http://localhost:8003/ -H "Content-Type: application/json" -d '{
 }' --max-time 90
 ```
 
-Confirm `status.state` moves to `"completed"` with a real (non-empty) answer, and check weather_agent's console for the absence of `Queue is closed. Event will not be dequeued.`.
+Confirm the final status-update's `state` moves to `"completed"` with a real (non-empty) answer, and check weather_agent's console for the absence of `Queue is closed. Event will not be dequeued.`.
 
 ### 4.2 — Two concurrent sessions to the same agent
 
 Fire two independent weather queries at the same agent in parallel (no shared `taskId`, so each should get its own task) and confirm no cross-talk between the responses:
 
 ```bash
-curl -s -X POST http://localhost:8003/ -H "Content-Type: application/json" -d '{
-  "jsonrpc": "2.0", "id": "1", "method": "message/send",
+curl -N -s -X POST http://localhost:8003/ -H "Content-Type: application/json" -d '{
+  "jsonrpc": "2.0", "id": "1", "method": "message/stream",
   "params": {"message": {"role": "user", "parts": [{"kind": "text", "text": "Current weather in Tokyo, Japan?"}], "messageId": "msg-4-2a"}}
 }' --max-time 90 > /tmp/session_a.json &
 
-curl -s -X POST http://localhost:8003/ -H "Content-Type: application/json" -d '{
-  "jsonrpc": "2.0", "id": "2", "method": "message/send",
+sleep 1   # stagger slightly - see note below
+
+curl -N -s -X POST http://localhost:8003/ -H "Content-Type: application/json" -d '{
+  "jsonrpc": "2.0", "id": "2", "method": "message/stream",
   "params": {"message": {"role": "user", "parts": [{"kind": "text", "text": "Current weather in Sydney, Australia?"}], "messageId": "msg-4-2b"}}
 }' --max-time 90 > /tmp/session_b.json &
 
 wait
 
-jq -r '.result.status.message.parts[0].text' /tmp/session_a.json
-jq -r '.result.status.message.parts[0].text' /tmp/session_b.json
-jq -r '.result.id' /tmp/session_a.json /tmp/session_b.json  # confirm two distinct taskIds
+for f in /tmp/session_a.json /tmp/session_b.json; do
+  echo "--- $f ---"
+  sed -n 's/^data: //p' "$f" | jq -s '
+    [.[] | select(.result.kind == "status-update" and .result.status.state == "completed")]
+    | last | .result.status.message.parts[0].text'
+  sed -n 's/^data: //p' "$f" | jq -s '[.[] | select(.result.kind == "task")] | first | .result.id'  # confirm two distinct taskIds
+done
 ```
+
+> **Note:** the `sleep 1` stagger works around `weather_agent`'s NVIDIA free-tier backend (`ChatNVIDIA`, `stepfun-ai/step-3.7-flash`), which rejects two truly-simultaneous requests with `429 Too Many Requests` before either reaches the model — a hosted-API rate limit, not a session-isolation bug in our own code. A 1-second head start is enough to dodge the burst limit while the two requests still overlap for most of their duration (the model call itself takes much longer than 1s), so this still meaningfully exercises concurrent task handling. If you still see `.error` in either file instead of `.result`, check for `429` specifically before assuming a real bug — inspect with `jq . /tmp/session_a.json /tmp/session_b.json` and increase the stagger if needed.
 
 Confirm the two `taskId`s differ and each answer actually matches its own city (Tokyo in `session_a`, Sydney in `session_b`) — not swapped or blended.
 

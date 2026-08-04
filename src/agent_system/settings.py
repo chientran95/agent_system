@@ -67,6 +67,17 @@ WEATHER_AGENT_URL = os.getenv(
 
 ORCHESTRATOR_HOST = os.getenv("ORCHESTRATOR_HOST", "0.0.0.0")
 ORCHESTRATOR_PORT = int(os.getenv("ORCHESTRATOR_PORT", "8000"))
+ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", f"http://localhost:{ORCHESTRATOR_PORT}")
+
+# Which orchestrator implementation actually runs behind `uv run orchestrator`
+# (see orchestrator_main.py). "adk" (default) keeps the existing ADK
+# session-REST-API orchestrator (orchestrator_server.py) - kept as-is/stale.
+# "langgraph" switches to the A2A-native orchestrator (orchestrator_agent.py +
+# orchestrator_langgraph_server.py), built to sidestep BUG_ORCHESTRATOR_RESUME.md
+# by reusing the same interrupt()/checkpointer + call_peer_agent_by_name
+# pattern already proven across the rest of the mesh, instead of depending on
+# ADK's RemoteA2aAgent to reconstruct a paused sub-agent's branch state.
+ORCHESTRATOR_BACKEND = os.getenv("ORCHESTRATOR_BACKEND", "adk")
 
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 CHECKPOINT_DB.parent.mkdir(parents=True, exist_ok=True)

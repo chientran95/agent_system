@@ -33,7 +33,7 @@ dependencies = [
 ]
 
 [project.scripts]
-orchestrator = "agent_system.orchestrator_server:main"
+orchestrator = "agent_system.orchestrator_main:main"
 code-agent = "agent_system.code_agent_server:main"
 research-agent = "agent_system.research_agent_server:main"
 weather-agent = "agent_system.weather_agent_server:main"
