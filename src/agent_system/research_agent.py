@@ -4,7 +4,7 @@ from typing import Any
 from ddgs import DDGS
 from deepagents import create_deep_agent
 from langchain.agents.middleware.types import AgentMiddleware
-from langchain.chat_models import init_chat_model
+from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 from .a2a_peer_client import PeerInputRequired, call_peer_agent_by_name
 from .content_agent import ContentAgent
 from .langfuse_tracing import get_langchain_callbacks
-from .settings import CODE_AGENT_URL, LANGCHAIN_RESEARCH_AGENT_MODEL
+from .settings import CLAUDE_API_KEY, CODE_AGENT_URL, RESEARCH_AGENT_MODEL
 
 RESEARCH_SYSTEM_PROMPT = (
     "You are a research agent with these capabilities: the web_search tool, "
@@ -176,16 +176,16 @@ class ResearchAgent:
     def __init__(self) -> None:
         self.content_agent = ContentAgent()
         self.checkpointer = InMemorySaver()
-        checker_model = init_chat_model(LANGCHAIN_RESEARCH_AGENT_MODEL)
+        model = ChatAnthropic(model=RESEARCH_AGENT_MODEL, api_key=CLAUDE_API_KEY)
         self.client = create_deep_agent(
-            model=LANGCHAIN_RESEARCH_AGENT_MODEL,
+            model=model,
             tools=[web_search, call_code_agent, ask_user],
             subagents=[self.content_agent.as_subagent()],
             system_prompt=RESEARCH_SYSTEM_PROMPT,
-            middleware=[ClarifyTopicMiddleware(checker_model)],
+            middleware=[ClarifyTopicMiddleware(model)],
             checkpointer=self.checkpointer,
         )
-        print(f"ResearchAgent initialized with LLM={LANGCHAIN_RESEARCH_AGENT_MODEL}")
+        print(f"ResearchAgent initialized with LLM=anthropic:{RESEARCH_AGENT_MODEL}")
 
     def research_and_write(self, topic: str, thread_id: str | None = None, call_depth: int = 0) -> str:
         print(f"ResearchAgent: researching topic:\n{topic}\n")

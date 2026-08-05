@@ -29,8 +29,13 @@ LITELLM_ORCHESTRATOR_MODEL = f"ollama_chat/{ORCHESTRATOR_MODEL}"
 CONTENT_AGENT_MODEL = os.getenv("CONTENT_AGENT_MODEL", "gpt-oss:20b")
 LITELLM_CONTENT_AGENT_MODEL = f"ollama_chat/{CONTENT_AGENT_MODEL}"
 
-RESEARCH_AGENT_MODEL = os.getenv("RESEARCH_AGENT_MODEL", "gpt-oss:20b")
-LANGCHAIN_RESEARCH_AGENT_MODEL = f"ollama:{RESEARCH_AGENT_MODEL}"
+# research_agent runs against Anthropic's hosted API directly (ChatAnthropic)
+# rather than local Ollama - mistral-small3.2:24b demonstrably invented tool
+# kwargs against two independently-correct schemas (its own call_code_agent
+# tool and deepagents' built-in task tool), so this isn't a docstring-wording
+# problem, it's a tool-call-schema-adherence problem worth paying for. Reuses
+# CLAUDE_API_KEY - same Anthropic account as code_agent.
+RESEARCH_AGENT_MODEL = os.getenv("RESEARCH_AGENT_MODEL", "claude-haiku-4-5-20251001")
 
 # weather_agent runs against NVIDIA's hosted API (ChatNVIDIA) rather than
 # local Ollama - see docs/BUG_WEATHER_TOOL_SELECTION.md for why local models
@@ -68,6 +73,15 @@ WEATHER_AGENT_URL = os.getenv(
 ORCHESTRATOR_HOST = os.getenv("ORCHESTRATOR_HOST", "0.0.0.0")
 ORCHESTRATOR_PORT = int(os.getenv("ORCHESTRATOR_PORT", "8000"))
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", f"http://localhost:{ORCHESTRATOR_PORT}")
+
+# The langgraph orchestrator's own model (plan/summarize steps) - separate
+# from ORCHESTRATOR_MODEL above, which stays owned by the ADK orchestrator
+# (orchestrator_server.py, kept as-is/stale) and expects an Ollama model
+# name. claude-haiku-4-5 was chosen after a standalone spike confirmed it
+# reliably produces correctly-ordered multi-wave plans - see the "waves"
+# design discussion; upgrade to CLAUDE_MODEL (Sonnet) only if real usage
+# later surfaces plans that come out wrong on harder requests.
+ORCHESTRATOR_AGENT_MODEL = os.getenv("ORCHESTRATOR_AGENT_MODEL", "claude-haiku-4-5-20251001")
 
 # Which orchestrator implementation actually runs behind `uv run orchestrator`
 # (see orchestrator_main.py). "adk" (default) keeps the existing ADK

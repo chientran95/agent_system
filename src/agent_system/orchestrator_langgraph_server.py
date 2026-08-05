@@ -86,11 +86,12 @@ def build_agent_card() -> AgentCard:
     return AgentCard(
         name="orchestrator",
         description=(
-            "Routes a request to exactly one of coding_agent, research_agent, "
-            "or weather_agent via a structured-output routing decision, then "
-            "relays that sub-agent's response as-is. LangGraph-native "
-            "alternative to the ADK orchestrator (orchestrator_server.py) - "
-            "see ORCHESTRATOR_BACKEND in settings.py."
+            "Plans a request into an ordered list of waves of steps for "
+            "coding_agent, research_agent, and/or weather_agent - steps "
+            "within a wave run in parallel, waves run in sequence - then "
+            "summarizes the combined results into one final answer. "
+            "LangGraph-native alternative to the ADK orchestrator "
+            "(orchestrator_server.py) - see ORCHESTRATOR_BACKEND in settings.py."
         ),
         url=ORCHESTRATOR_URL,
         version="0.1.0",
@@ -99,14 +100,15 @@ def build_agent_card() -> AgentCard:
         defaultOutputModes=["text"],
         skills=[
             AgentSkill(
-                id="route_request",
-                name="Route a request",
+                id="plan_and_delegate",
+                name="Plan and delegate a request",
                 description=(
-                    "Picks the single most relevant sub-agent for a request and "
-                    "delegates to it, bubbling up any clarifying question the "
-                    "chosen sub-agent needs answered."
+                    "Decomposes a request into parallel-safe waves of steps, "
+                    "dispatches each step to the relevant sub-agent, bubbles up "
+                    "any clarifying question a step's sub-agent needs answered, "
+                    "and summarizes the results into a final answer."
                 ),
-                tags=["orchestrator", "routing", "langgraph", "ollama"],
+                tags=["orchestrator", "planning", "langgraph", "anthropic"],
             )
         ],
     )
