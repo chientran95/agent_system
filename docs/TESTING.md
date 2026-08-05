@@ -185,7 +185,7 @@ This resumes the *same* checkpointed LangGraph state (the task ID doubles as the
 
 ## Orchestrator (port 8000)
 
-Uses ADK's session-based REST API, not A2A JSON-RPC directly.
+Two interchangeable implementations, switched via `ORCHESTRATOR_BACKEND` in `.env` - only one runs at a time, same port. Everything below is the **ADK backend** (the default), which uses ADK's session-based REST API, not A2A JSON-RPC directly. For the **LangGraph backend** (`ORCHESTRATOR_BACKEND=langgraph` - plain A2A JSON-RPC, plans a request into waves of steps instead of routing to one agent, and doesn't hit [BUG_ORCHESTRATOR_RESUME.md](BUG_ORCHESTRATOR_RESUME.md)), see [curl_commands.md](curl_commands.md) scenario 3's "LangGraph backend" section.
 
 ### Health / discovery
 

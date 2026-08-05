@@ -1,6 +1,6 @@
 # Bug: Orchestrator-mediated resume of a paused sub-agent task silently produces nothing
 
-**Status:** Unresolved — root-caused to `google-adk`'s experimental `RemoteA2aAgent`, no fix or workaround found
+**Status:** Unresolved in `google-adk` itself — no fix or workaround found for the ADK orchestrator. **Sidestepped** (not fixed) by a second orchestrator implementation added later, `orchestrator_agent.py`/`orchestrator_langgraph_server.py` (`ORCHESTRATOR_BACKEND=langgraph`), which doesn't depend on `RemoteA2aAgent` at all — see "Update" at the bottom of this doc.
 **Component:** `google-adk` (third-party), specifically `google/adk/agents/remote_a2a_agent.py`
 **Affects:** Resuming a paused (`input-required`) sub-agent task by sending a follow-up message *through the orchestrator*, when that sub-agent is a streaming-capable `RemoteA2aAgent` (i.e. `code_agent`, and now `weather_agent` too)
 
@@ -85,3 +85,13 @@ Extensive, in order:
 - **The only approach left that would actually work**, given step 17's finding that the gap is structural: have `ResumePendingInputMiddleware` bypass ADK's broken continuation path entirely rather than trying to make ADK reconstruct it. Concretely: extract the `a2a:task_id`/`a2a:context_id` metadata already present on the sub-agent's original pause event (fetched the same way the middleware already fetches the pending mock-call `id`/`name` today), call the sub-agent's A2A endpoint directly with those IDs (reusing the same direct-resume mechanism already verified working, e.g. via `a2a_peer_client.call_peer_agent`), and hand-construct the ADK-shaped SSE/JSON response ourselves - short-circuiting `call_next(request)` for this one case instead of passing through to ADK's normal handler. This is a real, scoped implementation effort (a small resume-orchestration layer), not a quick patch - explicitly deferred rather than started, pending a decision on whether it's worth the investment versus just using direct agent-to-agent calls for anything that needs `input-required`.
 - File an issue upstream against `google/adk-python` with this write-up as a repro (none currently exists).
 - As a product-level workaround, avoid routing agents that need mid-conversation clarification through the orchestrator's long-running-tool pattern — e.g. have sub-agents make a best-effort guess instead of pausing when reached via `transfer_to_agent`, reserving the pause/resume pattern for direct agent-to-agent calls where it's confirmed to work.
+
+## Update: sidestepped via a second, non-ADK orchestrator
+
+Rather than pursue the "possible next steps" above, a parallel orchestrator implementation was built: `orchestrator_agent.py` (a hand-built LangGraph graph) + `orchestrator_langgraph_server.py` (a plain A2A server, same shape as `code_agent_server.py`/`weather_agent_server.py`), switched via `ORCHESTRATOR_BACKEND=langgraph` in `.env` (default remains `adk`, this file's ADK orchestrator, kept as-is/stale).
+
+This doesn't fix the underlying `google-adk` bug — it avoids depending on the broken code path entirely. The LangGraph orchestrator delegates to sub-agents via `call_peer_agent_by_name` (the same mesh primitive `research_agent`'s `call_code_agent` tool already used successfully) and bubbles a sub-agent's pause via `PeerInputRequired` → `interrupt()`, the identical checkpointer-based pattern already proven solid everywhere else in this project — never touching `RemoteA2aAgent`'s branch-reconstruction-on-resume logic at all, so there's no equivalent of this bug to hit.
+
+Verified live: resuming a paused sub-agent step through the LangGraph orchestrator reaches `"completed"` correctly, unlike the identical scenario through the ADK orchestrator (still reproduces this bug exactly as documented above, unchanged).
+
+See [curl_commands.md](curl_commands.md) scenario 3's "LangGraph backend" section for request examples, and [TEST_SCENARIOS.md](TEST_SCENARIOS.md) scenario 3 for the updated per-backend coverage matrix.

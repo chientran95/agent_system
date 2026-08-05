@@ -4,7 +4,9 @@ Commands for exercising [TEST_SCENARIOS.md](TEST_SCENARIOS.md), scenarios 1 thro
 
 Make sure `code_agent` (port 8001), `research_agent` (port 8002), `weather_agent` (port 8003), and `orchestrator` (port 8000) are running before you start. Scenario 5 additionally needs Jaeger up (`make jaeger`, UI/API at port 16686) and, optionally, Langfuse keys set in `.env` for the Langfuse-only checks.
 
-Every request below uses streaming (`message/stream` for the three A2A agents, `/run_sse` for the ADK orchestrator) rather than a blocking call — all agent servers declare `AgentCapabilities(streaming=True)` (`code_agent`, `research_agent`, `weather_agent`, and the LangGraph orchestrator alternative), and ADK's own `/run_sse` is its streaming route. `-N` disables curl's output buffering so events print as they arrive.
+The orchestrator has two interchangeable implementations, switched via `ORCHESTRATOR_BACKEND` in `.env` (`adk` or `langgraph`) — only one runs at a time, on the same port, so check which one you've got running before using scenario 3's commands (they're split into an "ADK backend" and "LangGraph backend" section, each with a different request shape).
+
+Every request below uses streaming (`message/stream` for the three A2A agents and the LangGraph orchestrator, `/run_sse` for the ADK orchestrator) rather than a blocking call — all agent servers declare `AgentCapabilities(streaming=True)` (`code_agent`, `research_agent`, `weather_agent`, and the LangGraph orchestrator alternative), and ADK's own `/run_sse` is its streaming route. `-N` disables curl's output buffering so events print as they arrive.
 
 ### Reading streaming responses
 
@@ -405,6 +407,10 @@ That's what proves the registry (not the fallback) drove the routing.
 
 ## Scenario 3 — Orchestrator routing + resume-correlation
 
+There are two orchestrator implementations, switched via `ORCHESTRATOR_BACKEND` in `.env` - only one runs at a time, on the same port. **3.1-3.4 and the cleanup section below are the "adk" backend** (the default). **See "LangGraph backend" at the end of this scenario for the "langgraph" backend**, which speaks plain A2A JSON-RPC (same shape as the other three agents) instead of ADK's session-REST API, and plans/dispatches waves of steps instead of routing to exactly one agent.
+
+### ADK backend
+
 The orchestrator is a different shape entirely from the other three servers: it's ADK's own session-based REST API (`get_fast_api_app`), not raw A2A JSON-RPC. Every request needs a session created first, and `appName` is always `orchestrator` (the sub-folder name under `orchestrator_agents/`).
 
 ### 3.1 — Route to each of the 3 sub-agents
@@ -556,6 +562,101 @@ curl -s -o /dev/null -w "%{http_code}\n" "http://localhost:8000/apps/orchestrato
 ```
 
 `404` means deleted; `200` means it's still there. Note: with the default `InMemorySessionService`, restarting the orchestrator process clears all sessions anyway — this is mainly for cleanup within a single run.
+
+### LangGraph backend
+
+Plain A2A JSON-RPC — same `message/stream` shape, same task-ID/resume mechanics, and the same "Reading streaming responses" patterns from the top of this doc apply directly. No session creation step needed.
+
+#### Multi-step plan (parallel + sequential waves)
+
+```bash
+curl -N -s -X POST http://localhost:8000/ -H "Content-Type: application/json" -d '{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "method": "message/stream",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [{"kind": "text", "text": "Research current best practices for rate limiting in Python web APIs, write example code implementing it, and check the current weather forecast for Berlin so we can plan a maintenance window."}],
+      "messageId": "msg-3-lg-1"
+    }
+  }
+}' --max-time 400
+```
+
+Watch for a `[plan]`-labeled progress event describing the generated waves (e.g. `wave 0: [research_agent, weather_agent]; wave 1: [coding_agent]`), then one `[dispatch_step]` event per completed step (`research_agent`/`weather_agent` interleaved since they're in the same wave, `coding_agent` only after both finish), then a final `[summarize]`/`completed` event combining all three results.
+
+#### Single-agent request (plan degrades to one wave, one step)
+
+```bash
+curl -N -s -X POST http://localhost:8000/ -H "Content-Type: application/json" -d '{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "method": "message/stream",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [{"kind": "text", "text": "What is the current weather in Tokyo, Japan?"}],
+      "messageId": "msg-3-lg-2"
+    }
+  }
+}' --max-time 90
+```
+
+Same coverage as 3.1's per-agent routing checks, just through the plan/dispatch/summarize path instead of a dedicated route step — `[plan]` should show a single wave with a single `weather_agent` step, and since there's only one step result, `summarize` returns it unchanged rather than paraphrasing (see `summarize_node`'s single-step shortcut).
+
+#### A step pauses → resume (this actually completes, unlike the ADK backend)
+
+```bash
+# 1. underspecified - weather_agent should ask for a location
+curl -N -s -X POST http://localhost:8000/ -H "Content-Type: application/json" -d '{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "method": "message/stream",
+  "params": {
+    "message": {
+      "role": "user",
+      "parts": [{"kind": "text", "text": "What is the weather like today?"}],
+      "messageId": "msg-3-lg-3a"
+    }
+  }
+}' --max-time 60 > /tmp/scenario_3_lg.json
+```
+
+Extract the task ID, same pattern as scenario 1.5:
+
+```bash
+sed -n 's/^data: //p' /tmp/scenario_3_lg.json | jq -s '[.[] | select(.result.kind == "task")] | first | .result.id'
+```
+
+```bash
+# 2. resume - replace <TASK_ID> with the id from step 1
+curl -N -s -X POST http://localhost:8000/ -H "Content-Type: application/json" -d '{
+  "jsonrpc": "2.0",
+  "id": "2",
+  "method": "message/stream",
+  "params": {
+    "message": {
+      "role": "user",
+      "taskId": "<TASK_ID>",
+      "parts": [{"kind": "text", "text": "Berlin, Germany"}],
+      "messageId": "msg-3-lg-3b"
+    }
+  }
+}' --max-time 90
+```
+
+Confirm `status.state` moves all the way to `"completed"` — **this is the exact case that's structurally broken on the ADK backend** (3.3's known limitation, [BUG_ORCHESTRATOR_RESUME.md](BUG_ORCHESTRATOR_RESUME.md)). The LangGraph backend sidesteps that bug entirely by using the same `interrupt()`/checkpointer mechanism already proven across the rest of the mesh, rather than depending on ADK's `RemoteA2aAgent` to reconstruct a paused branch.
+
+> **Note:** if a wave happens to have two steps that both pause simultaneously, resuming answers one at a time — a fresh `input-required` after your resume means a second question is still pending, not that the resume failed silently.
+
+#### Sanity check
+
+```bash
+curl -s http://localhost:8000/.well-known/agent-card.json
+```
+
+No `/health`/`/list-apps`/session-creation equivalent needed — if this returns a card, the orchestrator is up. (Same role as 3.4's smoke test, but a plan/structured-output failure surfaces as a real error in the response rather than empty `parts`, so there's less need for a dedicated non-empty-response check here.)
 
 ---
 
