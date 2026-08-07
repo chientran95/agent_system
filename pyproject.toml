@@ -31,6 +31,7 @@ dependencies = [
   "langchain-mcp-adapters>=0.3.0",
   "langchain-nvidia-ai-endpoints>=1.4.3",
   "langchain-anthropic>=1.4.8",
+  "ag-ui-protocol>=0.1.19",
 ]
 
 [project.scripts]

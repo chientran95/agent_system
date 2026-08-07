@@ -7,12 +7,14 @@ from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
 from a2a.types import AgentCapabilities, AgentCard, AgentSkill, Part, TaskState, TextPart
 from a2a.utils import new_task
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from .a2a_peer_client import get_incoming_call_depth
 from .a2a_queue_workaround import ResilientQueueManager
 from .a2a_tracing import init_tracing, instrument_app
 from .a2a_utils import get_original_user_text
 from .orchestrator_agent import OrchestratorAgent
+from .orchestrator_agui_server import add_orchestrator_agui_endpoint
 from .settings import ORCHESTRATOR_HOST, ORCHESTRATOR_PORT, ORCHESTRATOR_URL
 
 _PROGRESS_PREVIEW_CHARS = 300
@@ -117,12 +119,29 @@ def build_agent_card() -> AgentCard:
 def create_app() -> FastAPI:
     init_tracing(service_name="orchestrator_langgraph_a2a")
     agent_card = build_agent_card()
+    executor = OrchestratorExecutor()
     handler = DefaultRequestHandler(
-        agent_executor=OrchestratorExecutor(),
+        agent_executor=executor,
         task_store=InMemoryTaskStore(),
         queue_manager=ResilientQueueManager(),
     )
     app = A2AFastAPIApplication(agent_card=agent_card, http_handler=handler).build()
+    # The AG-UI endpoint below is called directly from a browser (the ui/
+    # Vite dev server on a different port), which needs CORS - the A2A route
+    # doesn't need this since nothing in this project calls it from a
+    # browser. Wide open since this is a local dev tool, not a deployed
+    # service with real access control anywhere in this stack yet.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    # Same OrchestratorAgent instance (same checkpointer, same pending-
+    # interrupts tracking) exposed a second way - AG-UI at /agui alongside
+    # A2A JSON-RPC at /. See orchestrator_agui_server.py for why this is a
+    # hand-rolled translator rather than the ag-ui-langgraph package.
+    add_orchestrator_agui_endpoint(app, executor.agent, "/agui")
     instrument_app(app)
     return app
 

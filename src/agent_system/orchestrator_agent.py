@@ -137,15 +137,15 @@ class OrchestratorAgent:
         self.model = ChatAnthropic(model=ORCHESTRATOR_AGENT_MODEL, api_key=CLAUDE_API_KEY)
         self.planner = self.model.with_structured_output(Plan)
         self.checkpointer = InMemorySaver()
-        # thread_id -> the id of the specific pending Interrupt the last
-        # input-required pause surfaced. A2A callers only ever send back
-        # plain text + taskId, never an interrupt id, so this has to be
-        # tracked server-side - same shape as code_agent_server.py's
-        # task.id -> Claude session_id map. Only needed because a wave can
-        # have multiple simultaneous pauses (see the fan-out spike); resolved
-        # one at a time, resuming one correctly re-surfaces any others still
-        # pending, so no bundling/parsing of multi-part answers is needed.
-        self._pending_interrupt_ids: dict[str, str] = {}
+        # thread_id -> ALL Interrupts a wave paused on, not just the first.
+        # A2A callers only ever send back plain text + taskId, never an
+        # interrupt id, so this has to be tracked server-side - same shape as
+        # code_agent_server.py's task.id -> Claude session_id map. Storing
+        # the full list (not just one id) is what lets the AG-UI layer show
+        # every pending question at once instead of discovering them one at
+        # a time - see docs/BUG_AG_UI_MULTI_INTERRUPT.md for why ag-ui-
+        # langgraph's own tasks[0]-only handling isn't safe to rely on here.
+        self._pending_interrupts: dict[str, list[Interrupt]] = {}
         self._graph = self._build_graph()
         print(f"OrchestratorAgent (langgraph) initialized with LLM=anthropic:{ORCHESTRATOR_AGENT_MODEL}")
 
@@ -238,18 +238,43 @@ class OrchestratorAgent:
         "plan" for the generated plan, "dispatch_step" per completed worker
         step, "summarize" for the final combined answer. The final yield is
         either ("__final__", answer) on completion, or ("input_required",
-        question) if a worker paused - one question at a time, even if
-        multiple steps in a wave pause simultaneously. Pass the same
-        thread_id to aresume_route to continue."""
+        question) if one or more workers paused - question here is always
+        just the FIRST pending question's text, for A2A's single-message
+        contract; call get_pending_interrupts(thread_id) for the complete
+        list (used by the AG-UI layer to show all of them at once). Pass the
+        same thread_id to aresume_route to continue."""
         async for item in self._astream_graph(
             {"messages": [HumanMessage(content=request)]}, thread_id, call_depth
         ):
             yield item
 
-    async def aresume_route(self, answer: str, thread_id: str, call_depth: int = 0):
-        """Resumes a run previously paused (input_required)."""
-        interrupt_id = self._pending_interrupt_ids.get(thread_id)
-        resume_value = {interrupt_id: answer} if interrupt_id else answer
+    def get_pending_interrupts(self, thread_id: str) -> list[Interrupt]:
+        """All interrupts a wave paused on for this thread, not just the
+        first. Empty if the thread isn't currently paused."""
+        return list(self._pending_interrupts.get(thread_id, []))
+
+    async def aresume_route(self, resume: str | dict[str, str], thread_id: str, call_depth: int = 0):
+        """Resumes a run previously paused (input_required).
+
+        `resume` is either:
+        - a plain answer string - resolves the FIRST pending interrupt only
+          (A2A's contract: callers only ever send back plain text, never an
+          interrupt id, so we resolve whichever pending interrupt we
+          surfaced as "the" question). If others are still pending after
+          this, the next input_required response surfaces the next one.
+        - a dict of {interrupt_id: answer} - resolves one or more SPECIFIC
+          pending interrupts at once (AG-UI's contract, built from its
+          RunAgentInput.resume array). Any pending interrupt not included
+          stays pending and gets re-surfaced on the next call - verified via
+          a standalone spike that LangGraph handles partial multi-interrupt
+          resume correctly, not just all-or-nothing.
+        """
+        if isinstance(resume, dict):
+            resume_value = resume
+        else:
+            pending = self._pending_interrupts.get(thread_id, [])
+            interrupt_id = pending[0].id if pending else None
+            resume_value = {interrupt_id: resume} if interrupt_id else resume
         async for item in self._astream_graph(Command(resume=resume_value), thread_id, call_depth):
             yield item
 
@@ -259,15 +284,21 @@ class OrchestratorAgent:
             "callbacks": get_langchain_callbacks(),
         }
         final_text = ""
-        interrupted: Interrupt | None = None
+        interrupted: list[Interrupt] = []
         async for chunk in self._graph.astream(input_value, stream_mode="updates", config=config):
             for node_name, node_output in (chunk or {}).items():
                 if node_name == "__interrupt__":
-                    # Only the first is surfaced per round trip - resuming it
-                    # correctly re-surfaces any others still pending on the
-                    # next call (verified in the fan-out spike), so pauses
-                    # are resolved one at a time rather than bundled.
-                    interrupted = node_output[0] if node_output else None
+                    # ACCUMULATES across chunks, does not overwrite -
+                    # stream_mode="updates" emits a SEPARATE __interrupt__
+                    # chunk per interrupted branch when multiple steps in a
+                    # wave pause simultaneously (unlike .ainvoke()'s single
+                    # combined final state), confirmed via a standalone
+                    # repro. Using `interrupted = list(node_output)` here
+                    # silently dropped every interrupt but the last one -
+                    # a real bug in this file, not just in ag-ui-langgraph's
+                    # analogous tasks[0]-only bug. See
+                    # docs/BUG_AG_UI_MULTI_INTERRUPT.md.
+                    interrupted.extend(node_output or [])
                     continue
                 messages = node_output.get("messages", []) if isinstance(node_output, dict) else []
                 for message in messages:
@@ -277,9 +308,9 @@ class OrchestratorAgent:
                     if getattr(message, "type", None) == "ai":
                         final_text = text
                     yield node_name, text
-        if interrupted is not None:
-            self._pending_interrupt_ids[thread_id] = interrupted.id
-            yield "input_required", interrupted.value
+        if interrupted:
+            self._pending_interrupts[thread_id] = interrupted
+            yield "input_required", interrupted[0].value
         else:
-            self._pending_interrupt_ids.pop(thread_id, None)
+            self._pending_interrupts.pop(thread_id, None)
             yield "__final__", final_text
