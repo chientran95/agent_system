@@ -165,6 +165,13 @@ class OrchestratorAgent:
             summary = "; ".join(
                 f"wave {i}: [{', '.join(s.agent_name for s in wave.steps)}]" for i, wave in enumerate(plan.waves)
             )
+            # Printed directly to console, not just streamed as a progress
+            # chunk to callers - every other agent server prints a
+            # discovery/dispatch line (e.g. "[code_agent] new task=..."),
+            # and the plan's wave grouping is exactly the thing you need to
+            # see immediately when debugging whether two steps landed in the
+            # same wave (parallel) or different waves (sequential).
+            print(f"[orchestrator] plan_node: {len(plan.waves)} wave(s) - {summary}")
             return {
                 "plan": plan.model_dump(),
                 "current_wave_index": 0,
